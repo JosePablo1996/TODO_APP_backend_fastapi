@@ -1,0 +1,48 @@
+# Framework principal
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+
+# Cliente HTTP - Versión compatible con supabase
+httpx==0.27.2
+
+# ⚠️ IMPORTANTE: pydantic >= 2.12.0 es REQUERIDO para Python 3.14
+pydantic==2.12.5
+pydantic-settings==2.8.1
+
+# Utilidades básicas
+python-dotenv==1.0.0
+python-multipart==0.0.20
+email-validator==2.2.0
+
+# JWT y seguridad
+PyJWT==2.10.1
+cryptography==44.0.2
+
+# ✅ WebAuthn para passkeys
+webauthn==2.1.0
+
+# Logging
+loguru==0.7.3
+
+# ✅ SUPABASE - NUEVA DEPENDENCIA
+supabase==2.5.0
+
+# ✅ Python-JOSE para manejo de JWT
+python-jose[cryptography]==3.3.0
+
+# ✅ Passlib para hashing (fallback)
+passlib[bcrypt]==1.7.4
+
+# ✅ Jinja2 para plantillas de email
+Jinja2==3.1.4
+
+# ============================================
+# ✅ NUEVAS DEPENDENCIAS PARA 2FA (SIN PILLOW)
+# ============================================
+# Generación y verificación de códigos TOTP
+pyotp==2.9.0
+
+# Generación de códigos QR - versión actualizada
+qrcode==8.0
+
+# Nota: No incluimos pillow, usaremos SVG en lugar de PNG

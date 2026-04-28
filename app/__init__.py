@@ -1,0 +1,80 @@
+# app/__init__.py
+"""
+Paquete principal de la API de Todo App con Supabase Auth
+"""
+
+from app.config import settings
+from app.models import (
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    LoginRequest,
+    RefreshTokenRequest,
+    RegisterRequest,
+    RegisterResponse,
+    TokenResponse,
+    RefreshTokenResponse,
+    UserInfoResponse,
+    PasswordResetToken,
+    StandardResponse,
+    ErrorResponse,
+    HealthResponse,
+    VerifyTokenResponse,
+    ProfileUpdateRequest,
+    ProfileResponse,
+    UserResponse,
+    TaskBase,
+    TaskCreate,
+    TaskUpdate,
+    Task,
+    TaskStats,
+    # WebAuthn models
+    WebAuthnRegistrationBeginRequest,
+    WebAuthnRegistrationBeginResponse,
+    WebAuthnRegistrationCompleteRequest,
+    WebAuthnRegistrationCompleteResponse,
+    WebAuthnLoginBeginRequest,
+    WebAuthnLoginBeginResponse,
+    WebAuthnLoginCompleteRequest,
+    WebAuthnLoginCompleteResponse,
+    WebAuthnCredentialResponse,
+    WebAuthnDeleteRequest
+)
+
+__version__ = settings.API_VERSION
+
+__all__ = [
+    "settings",
+    "ForgotPasswordRequest",
+    "ResetPasswordRequest",
+    "LoginRequest",
+    "RefreshTokenRequest",
+    "RegisterRequest",
+    "RegisterResponse",
+    "TokenResponse",
+    "RefreshTokenResponse",
+    "UserInfoResponse",
+    "PasswordResetToken",
+    "StandardResponse",
+    "ErrorResponse",
+    "HealthResponse",
+    "VerifyTokenResponse",
+    "ProfileUpdateRequest",
+    "ProfileResponse",
+    "UserResponse",
+    "TaskBase",
+    "TaskCreate",
+    "TaskUpdate",
+    "Task",
+    "TaskStats",
+    "WebAuthnRegistrationBeginRequest",
+    "WebAuthnRegistrationBeginResponse",
+    "WebAuthnRegistrationCompleteRequest",
+    "WebAuthnRegistrationCompleteResponse",
+    "WebAuthnLoginBeginRequest",
+    "WebAuthnLoginBeginResponse",
+    "WebAuthnLoginCompleteRequest",
+    "WebAuthnLoginCompleteResponse",
+    "WebAuthnCredentialResponse",
+    "WebAuthnDeleteRequest",
+    "__version__",
+]
