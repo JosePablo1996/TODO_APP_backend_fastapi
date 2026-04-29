@@ -39,27 +39,34 @@ class WebAuthnService:
         
         # ✅ CORREGIDO: Si FRONTEND_URL contiene localhost, usar localhost primero
         if frontend_url and "localhost" in frontend_url:
-            # Desarrollo local o Render configurado para aceptar localhost
             self.rp_id = "localhost"
-            self.origin = frontend_url  # "http://localhost:5173"
+            self.origin = frontend_url
             logger.info(f"🏠 [WEBAUTHN] Usando configuración local (FRONTEND_URL={frontend_url})")
         elif is_render:
-            # Estamos en Render sin FRONTEND_URL localhost
             self.rp_id = render_host
             self.origin = f"https://{render_host}"
             logger.info(f"🔄 [WEBAUTHN] Detectado entorno Render (sin localhost)")
         elif frontend_url:
-            # Usar el FRONTEND_URL configurado si no es localhost
             self.rp_id = frontend_url.replace("https://", "").replace("http://", "").split(":")[0]
             self.origin = frontend_url
             logger.info(f"🌐 [WEBAUTHN] Usando FRONTEND_URL configurado: {frontend_url}")
         else:
-            # Desarrollo local por defecto
             self.rp_id = "localhost"
             self.origin = "http://localhost:5173"
             logger.info(f"🏠 [WEBAUTHN] Usando configuración por defecto (localhost)")
         
         self.rp_name = settings.API_TITLE
+
+        # ✅ Lista de orígenes permitidos (web + móvil)
+        self.allowed_origins = [
+            self.origin,
+            "http://localhost:5173",
+            "http://localhost:8000",
+            "https://todo-app-backend-fastapi-klh2.onrender.com",
+            "android:apk-key-hash:com.todoappmanager.flutter",
+        ]
+        # Eliminar duplicados manteniendo el orden
+        self.allowed_origins = list(dict.fromkeys(self.allowed_origins))
 
         # Almacenamiento de challenges (en producción usar Redis o DB)
         self.registration_challenges: Dict[str, Dict[str, Any]] = {}
@@ -68,7 +75,8 @@ class WebAuthnService:
         logger.info(f"✅ WebAuthnService inicializado")
         logger.info(f"   RP ID: {self.rp_id}")
         logger.info(f"   RP Name: {self.rp_name}")
-        logger.info(f"   Origin: {self.origin}")
+        logger.info(f"   Origin principal: {self.origin}")
+        logger.info(f"   Orígenes permitidos: {self.allowed_origins}")
         logger.info(f"   Entorno: {'Render' if is_render else 'Local'}")
         logger.info(f"   FRONTEND_URL: {frontend_url}")
         logger.info(f"   RENDER_EXTERNAL_HOSTNAME: {render_host or 'No disponible'}")
@@ -193,7 +201,6 @@ class WebAuthnService:
         try:
             admin_client = supabase_auth.get_admin_client()
 
-            # Codificar public_key a base64 para almacenamiento
             public_key_b64 = base64.b64encode(public_key).decode('utf-8')
             now = datetime.now().isoformat()
 
@@ -222,19 +229,6 @@ class WebAuthnService:
             error_msg = str(e)
             if "PGRST205" in error_msg:
                 logger.error("❌ La tabla user_passkeys no existe en Supabase")
-                logger.error("   Por favor, ejecuta el script SQL para crear la tabla:")
-                logger.error("   CREATE TABLE public.user_passkeys (")
-                logger.error("       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),")
-                logger.error("       user_id UUID NOT NULL REFERENCES auth.users(id),")
-                logger.error("       credential_id TEXT NOT NULL UNIQUE,")
-                logger.error("       public_key TEXT NOT NULL,")
-                logger.error("       sign_count BIGINT NOT NULL DEFAULT 0,")
-                logger.error("       device_name TEXT,")
-                logger.error("       device_type TEXT,")
-                logger.error("       last_used TIMESTAMP WITH TIME ZONE,")
-                logger.error("       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),")
-                logger.error("       updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()")
-                logger.error("   );")
             else:
                 logger.error(f"❌ Error guardando credencial: {error_msg[:200]}")
             return False
@@ -242,7 +236,6 @@ class WebAuthnService:
     async def update_credential_sign_count(self, credential_id: str, new_sign_count: int) -> bool:
         """Actualiza el sign_count de una credencial"""
         logger.debug(f"🔄 Actualizando sign_count para credencial: {credential_id[:20]}...")
-        logger.debug(f"   Nuevo sign_count: {new_sign_count}")
         
         if not supabase_auth.is_available():
             logger.warning("⚠️ Supabase no está disponible para actualizar sign_count")
@@ -259,8 +252,6 @@ class WebAuthnService:
             success = len(response.data) > 0
             if success:
                 logger.debug(f"✅ Sign_count actualizado exitosamente")
-            else:
-                logger.warning(f"⚠️ No se encontró credencial para actualizar sign_count")
             return success
             
         except Exception as e:
@@ -270,7 +261,6 @@ class WebAuthnService:
     async def delete_credential(self, user_id: str, credential_id: str) -> bool:
         """Elimina una credencial WebAuthn"""
         logger.info(f"🗑️ Eliminando credencial para usuario: {user_id}")
-        logger.debug(f"   Credential ID: {credential_id[:20]}...")
         
         if not supabase_auth.is_available():
             logger.warning("⚠️ Supabase no está disponible para eliminar credencial")
@@ -283,8 +273,6 @@ class WebAuthnService:
             success = len(response.data) > 0
             if success:
                 logger.info(f"✅ Credencial eliminada exitosamente")
-            else:
-                logger.warning(f"⚠️ Credencial no encontrada para eliminar")
             return success
             
         except Exception as e:
@@ -304,13 +292,7 @@ class WebAuthnService:
     ) -> Dict[str, Any]:
         """Genera opciones para registrar una nueva passkey"""
         logger.info(f"🔑 Generando opciones de registro para usuario: {user_id}")
-        logger.debug(f"   Email: {email}")
-        logger.debug(f"   Username: {username}")
-        logger.debug(f"   Device name: {device_name}")
-        logger.debug(f"   RP ID: {self.rp_id}")
-        logger.debug(f"   Origin: {self.origin}")
 
-        # Limpiar challenges expirados
         self._cleanup_expired_challenges()
 
         try:
@@ -328,10 +310,8 @@ class WebAuthnService:
                 attestation="none"
             )
 
-            # Convertir challenge a base64url string
             challenge_b64 = base64.urlsafe_b64encode(registration_options.challenge).decode('utf-8').rstrip('=')
 
-            # Almacenar el challenge para verificar después
             self.registration_challenges[user_id] = {
                 "challenge": challenge_b64,
                 "challenge_bytes": registration_options.challenge,
@@ -339,8 +319,6 @@ class WebAuthnService:
             }
             
             logger.debug(f"   ✅ Challenge almacenado para usuario: {user_id}")
-            logger.debug(f"   Challenge (string): {challenge_b64[:30]}...")
-            logger.debug(f"   Timeout: {registration_options.timeout}")
 
             return {
                 "challenge": challenge_b64,
@@ -351,8 +329,8 @@ class WebAuthnService:
                 "rp_name": self.rp_name,
                 "attestation": "none",
                 "pub_key_cred_params": [
-                    {"type": "public-key", "alg": -7},   # ES256
-                    {"type": "public-key", "alg": -257}  # RS256
+                    {"type": "public-key", "alg": -7},
+                    {"type": "public-key", "alg": -257}
                 ]
             }
 
@@ -361,7 +339,7 @@ class WebAuthnService:
             raise
 
     # ============================================
-    # VERIFICAR REGISTRO
+    # VERIFICAR REGISTRO (CON MÚLTIPLES ORÍGENES)
     # ============================================
 
     async def verify_registration(
@@ -374,92 +352,68 @@ class WebAuthnService:
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
         """Verifica la respuesta de registro de passkey"""
         logger.info(f"🔐 Verificando registro para usuario: {user_id}")
-        logger.info(f"   📝 Challenge recibido (string): {challenge[:50]}...")
         
-        # Obtener el challenge almacenado
         stored_data = self.registration_challenges.get(user_id)
         if not stored_data:
             logger.error(f"❌ No se encontró challenge almacenado para usuario: {user_id}")
-            logger.info(f"   🔍 Challenges almacenados: {list(self.registration_challenges.keys())}")
-            return False, None, "No se encontró challenge para verificación. Por favor, inicia el registro nuevamente."
+            return False, None, "No se encontró challenge para verificación."
         
         stored_challenge_string = stored_data["challenge"]
         stored_challenge_bytes = stored_data["challenge_bytes"]
         
-        logger.info(f"   📝 Challenge almacenado (string): {stored_challenge_string[:50]}...")
-        logger.info(f"   🌐 RP ID para verificación: {self.rp_id}")
-        logger.info(f"   🌐 Origin para verificación: {self.origin}")
+        logger.info(f"   🌐 RP ID: {self.rp_id}")
+        logger.info(f"   🌐 Orígenes permitidos: {self.allowed_origins}")
         
-        # Verificar que el string coincide
         if challenge != stored_challenge_string:
-            logger.error(f"❌ Challenge string no coincide")
-            logger.error(f"   Recibido: {challenge}")
-            logger.error(f"   Almacenado: {stored_challenge_string}")
-            return False, None, "Challenge no coincide. Por favor, inicia el registro nuevamente."
+            logger.error(f"❌ Challenge no coincide")
+            return False, None, "Challenge no coincide."
         
-        logger.info("   ✅ Challenge string verificado correctamente")
+        logger.info("   ✅ Challenge verificado correctamente")
         
-        try:
-            # Decodificar datos
-            logger.debug("   Decodificando datos...")
-            
-            client_data_json_bytes = base64.urlsafe_b64decode(client_data_json + '==')
-            attestation_object_bytes = base64.urlsafe_b64decode(attestation_object + '==')
-            credential_id_bytes = base64.urlsafe_b64decode(credential_id + '==')
-            
-            logger.debug("   ✅ Datos decodificados correctamente")
-
-            # Estructura completa con id y rawId
-            credential_dict = {
-                "id": credential_id,
-                "rawId": credential_id,
-                "type": "public-key",
-                "response": {
-                    "clientDataJSON": client_data_json,
-                    "attestationObject": attestation_object,
+        # ✅ Intentar verificar con cada origen permitido
+        last_error = None
+        for origin in self.allowed_origins:
+            try:
+                logger.debug(f"   Intentando verificar con origin: {origin}")
+                
+                credential_dict = {
+                    "id": credential_id,
+                    "rawId": credential_id,
+                    "type": "public-key",
+                    "response": {
+                        "clientDataJSON": client_data_json,
+                        "attestationObject": attestation_object,
+                    }
                 }
-            }
 
-            logger.debug("   Credential dict creado correctamente")
+                verification = verify_registration_response(
+                    credential=credential_dict,
+                    expected_challenge=stored_challenge_bytes,
+                    expected_rp_id=self.rp_id,
+                    expected_origin=origin,
+                    require_user_verification=True,
+                )
 
-            # Verificar respuesta de registro
-            logger.debug("   Verificando respuesta de registro...")
-            
-            verification = verify_registration_response(
-                credential=credential_dict,
-                expected_challenge=stored_challenge_bytes,
-                expected_rp_id=self.rp_id,
-                expected_origin=self.origin,
-                require_user_verification=True,
-            )
+                logger.info(f"✅ Registro verificado con origin: {origin}")
+                
+                public_key = verification.credential_public_key
+                sign_count = verification.sign_count
 
-            logger.debug(f"   Verificación completada exitosamente")
-            logger.info(f"✅ Registro verificado para usuario {user_id}")
+                del self.registration_challenges[user_id]
 
-            public_key = verification.credential_public_key
-            sign_count = verification.sign_count
-            credential_id_stored = credential_id
+                return True, {
+                    "credential_id": credential_id,
+                    "public_key": public_key,
+                    "sign_count": sign_count
+                }, None
 
-            logger.debug(f"   Public key length: {len(public_key)}")
-            logger.debug(f"   Sign count: {sign_count}")
-
-            # Limpiar challenge almacenado
-            del self.registration_challenges[user_id]
-
-            credential_data = {
-                "credential_id": credential_id_stored,
-                "public_key": public_key,
-                "sign_count": sign_count
-            }
-
-            return True, credential_data, None
-
-        except base64.binascii.Error as e:
-            logger.error(f"❌ Error decodificando base64 en registro: {str(e)}")
-            return False, None, f"Error decodificando datos: {str(e)}"
-        except Exception as e:
-            logger.error(f"❌ Error verificando registro: {str(e)}", exc_info=True)
-            return False, None, str(e)
+            except Exception as e:
+                last_error = str(e)
+                logger.debug(f"   ❌ Falló con origin '{origin}': {last_error[:100]}")
+                continue
+        
+        logger.error(f"❌ Todos los orígenes fallaron. Último error: {last_error}")
+        return False, None, f"Verificación fallida: {last_error}"
 
     # ============================================
     # GENERAR OPCIONES DE AUTENTICACIÓN
@@ -472,12 +426,7 @@ class WebAuthnService:
     ) -> Dict[str, Any]:
         """Genera opciones para autenticación con passkey"""
         logger.info(f"🔑 Generando opciones de autenticación")
-        logger.debug(f"   User ID: {user_id}")
-        logger.debug(f"   Credenciales permitidas: {len(allowed_credentials) if allowed_credentials else 0}")
-        logger.debug(f"   RP ID: {self.rp_id}")
-        logger.debug(f"   Origin: {self.origin}")
 
-        # Limpiar challenges expirados
         self._cleanup_expired_challenges()
 
         try:
@@ -487,9 +436,7 @@ class WebAuthnService:
                     {"id": cred["credential_id"], "type": "public-key"}
                     for cred in allowed_credentials
                 ]
-                logger.debug(f"   {len(allow_credentials)} credenciales formateadas")
 
-            logger.debug("   Generando opciones de autenticación...")
             auth_options = generate_authentication_options(
                 rp_id=self.rp_id,
                 allow_credentials=allow_credentials,
@@ -520,7 +467,7 @@ class WebAuthnService:
             raise
 
     # ============================================
-    # VERIFICAR AUTENTICACIÓN
+    # VERIFICAR AUTENTICACIÓN (CON MÚLTIPLES ORÍGENES)
     # ============================================
 
     async def verify_authentication(
@@ -535,78 +482,68 @@ class WebAuthnService:
     ) -> Tuple[bool, Optional[int], Optional[str]]:
         """Verifica la respuesta de autenticación con passkey"""
         logger.info(f"🔐 Verificando autenticación")
-        logger.debug(f"   Credential ID: {credential_id[:20]}...")
-        logger.debug(f"   Challenge recibido: {challenge[:30]}...")
         logger.debug(f"   RP ID: {self.rp_id}")
-        logger.debug(f"   Origin: {self.origin}")
+        logger.debug(f"   Orígenes permitidos: {self.allowed_origins}")
 
-        try:
-            session_id = user_id or "anonymous"
-            stored_data = self.authentication_challenges.get(session_id)
-            
-            if not stored_data:
-                logger.error(f"❌ No se encontró challenge almacenado para sesión: {session_id}")
-                logger.info(f"   🔍 Sesiones almacenadas: {list(self.authentication_challenges.keys())}")
-                return False, None, "No se encontró challenge para verificación"
-            
-            stored_challenge_string = stored_data["challenge"]
-            stored_challenge_bytes = stored_data["challenge_bytes"]
-            
-            if challenge != stored_challenge_string:
-                logger.error(f"❌ Challenge no coincide")
-                return False, None, "Challenge no coincide"
-            
-            logger.debug("   ✅ Challenge verificado correctamente")
-            
-            # Decodificar datos
-            logger.debug("   Decodificando datos...")
-            
-            client_data_json_bytes = base64.urlsafe_b64decode(client_data_json + '==')
-            authenticator_data_bytes = base64.urlsafe_b64decode(authenticator_data + '==')
-            signature_bytes = base64.urlsafe_b64decode(signature + '==')
-            credential_id_bytes = base64.urlsafe_b64decode(credential_id + '==')
-
-            public_key_bytes = base64.b64decode(stored_credential["public_key"])
-            
-            logger.debug("   ✅ Datos decodificados correctamente")
-
-            credential_dict = {
-                "id": credential_id,
-                "rawId": credential_id,
-                "type": "public-key",
-                "response": {
-                    "clientDataJSON": client_data_json,
-                    "authenticatorData": authenticator_data,
-                    "signature": signature,
+        session_id = user_id or "anonymous"
+        stored_data = self.authentication_challenges.get(session_id)
+        
+        if not stored_data:
+            logger.error(f"❌ No se encontró challenge almacenado para sesión: {session_id}")
+            return False, None, "No se encontró challenge para verificación"
+        
+        stored_challenge_string = stored_data["challenge"]
+        stored_challenge_bytes = stored_data["challenge_bytes"]
+        
+        if challenge != stored_challenge_string:
+            logger.error(f"❌ Challenge no coincide")
+            return False, None, "Challenge no coincide"
+        
+        logger.debug("   ✅ Challenge verificado correctamente")
+        
+        public_key_bytes = base64.b64decode(stored_credential["public_key"])
+        
+        # ✅ Intentar verificar con cada origen permitido
+        last_error = None
+        for origin in self.allowed_origins:
+            try:
+                logger.debug(f"   Intentando verificar con origin: {origin}")
+                
+                credential_dict = {
+                    "id": credential_id,
+                    "rawId": credential_id,
+                    "type": "public-key",
+                    "response": {
+                        "clientDataJSON": client_data_json,
+                        "authenticatorData": authenticator_data,
+                        "signature": signature,
+                    }
                 }
-            }
 
-            logger.debug("   Verificando respuesta de autenticación...")
-            
-            verification = verify_authentication_response(
-                credential=credential_dict,
-                expected_challenge=stored_challenge_bytes,
-                expected_rp_id=self.rp_id,
-                expected_origin=self.origin,
-                credential_public_key=public_key_bytes,
-                credential_current_sign_count=stored_credential["sign_count"],
-                require_user_verification=True,
-            )
+                verification = verify_authentication_response(
+                    credential=credential_dict,
+                    expected_challenge=stored_challenge_bytes,
+                    expected_rp_id=self.rp_id,
+                    expected_origin=origin,
+                    credential_public_key=public_key_bytes,
+                    credential_current_sign_count=stored_credential["sign_count"],
+                    require_user_verification=True,
+                )
 
-            logger.info(f"✅ Autenticación verificada exitosamente")
-            logger.debug(f"   Nuevo sign_count: {verification.new_sign_count}")
-            
-            if session_id in self.authentication_challenges:
-                del self.authentication_challenges[session_id]
-            
-            return True, verification.new_sign_count, None
+                logger.info(f"✅ Autenticación verificada con origin: {origin}")
+                
+                if session_id in self.authentication_challenges:
+                    del self.authentication_challenges[session_id]
+                
+                return True, verification.new_sign_count, None
 
-        except base64.binascii.Error as e:
-            logger.error(f"❌ Error decodificando base64 en autenticación: {str(e)}")
-            return False, None, f"Error decodificando datos: {str(e)}"
-        except Exception as e:
-            logger.error(f"❌ Error verificando autenticación: {str(e)}", exc_info=True)
-            return False, None, str(e)
+            except Exception as e:
+                last_error = str(e)
+                logger.debug(f"   ❌ Falló con origin '{origin}': {last_error[:100]}")
+                continue
+        
+        logger.error(f"❌ Todos los orígenes fallaron. Último error: {last_error}")
+        return False, None, f"Autenticación fallida: {last_error}"
 
 
 # Instancia global
