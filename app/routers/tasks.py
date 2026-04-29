@@ -28,7 +28,7 @@ class TaskBase(BaseModel):
 
 class TaskCreate(TaskBase):
     """Modelo para crear tarea"""
-    pass
+    color: Optional[str] = Field(None, description="Color de la tarea en formato hex")
 
 class TaskUpdate(BaseModel):
     """Modelo para actualizar tarea (todos los campos opcionales)"""
@@ -39,11 +39,13 @@ class TaskUpdate(BaseModel):
     due_date: Optional[str] = None
     category: Optional[str] = Field(None, max_length=50)
     tags: Optional[List[str]] = None
+    color: Optional[str] = Field(None, description="Color de la tarea en formato hex")
 
 class Task(TaskBase):
     """Modelo de respuesta de tarea"""
     id: str
     user_id: str
+    color: Optional[str] = Field(None, description="Color de la tarea")
     created_at: str
     updated_at: Optional[str] = None
 
@@ -60,13 +62,13 @@ class TaskStats(BaseModel):
 
 
 # ============================================
-# FUNCIONES AUXILIARES PARA SUPABASE (CORREGIDAS - SIN async)
+# FUNCIONES AUXILIARES PARA SUPABASE (SÍNCRONAS)
 # ============================================
 
 def get_tasks_table():
     """
     Obtiene la tabla de tareas de Supabase
-    ✅ CORREGIDO: Cambiado de async def a def
+    ✅ SINCRONO - No usa async/await
     """
     if not supabase_auth.is_available():
         raise HTTPException(
@@ -81,7 +83,7 @@ def get_tasks_table():
 def ensure_tasks_table_exists():
     """
     Verifica que la tabla de tareas existe
-    ✅ CORREGIDO: Cambiado de async def a def
+    ✅ SINCRONO - No usa async/await
     """
     try:
         admin_client = supabase_auth.get_admin_client()
@@ -102,6 +104,24 @@ def ensure_tasks_table_exists():
         else:
             logger.error(f"Error verificando tabla: {error_msg}")
             return False
+
+
+def _task_to_response(task_data: Dict[str, Any]) -> Task:
+    """Convierte un diccionario de tarea a modelo Task"""
+    return Task(
+        id=task_data["id"],
+        user_id=task_data["user_id"],
+        title=task_data["title"],
+        description=task_data.get("description"),
+        completed=task_data.get("completed", False),
+        priority=task_data.get("priority", "media"),
+        due_date=task_data.get("due_date"),
+        category=task_data.get("category"),
+        tags=task_data.get("tags", []),
+        color=task_data.get("color"),
+        created_at=task_data["created_at"],
+        updated_at=task_data.get("updated_at")
+    )
 
 
 # ============================================
@@ -125,7 +145,7 @@ async def get_tasks(
     logger.info(f"📋 Obteniendo tareas para usuario {user_id}")
     
     try:
-        # ✅ CORREGIDO: Sin await
+        # ✅ SINCRONO - Sin await
         if not ensure_tasks_table_exists():
             return []
         
@@ -153,24 +173,10 @@ async def get_tasks(
         # Aplicar paginación
         query = query.range(offset, offset + limit - 1)
         
-        # Ejecutar consulta
-        response = await query.execute()
+        # ✅ Ejecutar SIN await
+        response = query.execute()
         
-        tasks = []
-        for task in response.data:
-            tasks.append(Task(
-                id=task["id"],
-                user_id=task["user_id"],
-                title=task["title"],
-                description=task.get("description"),
-                completed=task.get("completed", False),
-                priority=task.get("priority", "media"),
-                due_date=task.get("due_date"),
-                category=task.get("category"),
-                tags=task.get("tags", []),
-                created_at=task["created_at"],
-                updated_at=task.get("updated_at")
-            ))
+        tasks = [_task_to_response(task) for task in response.data]
         
         logger.info(f"✅ {len(tasks)} tareas encontradas")
         return tasks
@@ -196,9 +202,10 @@ async def create_task(
     user_id = current_user.get("sub")
     logger.info(f"➕ Creando tarea para usuario {user_id}")
     logger.info(f"   Título: {task.title}")
+    logger.info(f"   Color: {task.color}")
     
     try:
-        # ✅ CORREGIDO: Sin await
+        # ✅ SINCRONO - Sin await
         ensure_tasks_table_exists()
         tasks_table = get_tasks_table()
         
@@ -214,12 +221,13 @@ async def create_task(
             "due_date": task.due_date,
             "category": task.category,
             "tags": task.tags or [],
+            "color": task.color,
             "created_at": now,
             "updated_at": now
         }
         
-        # Insertar en la base de datos
-        response = await tasks_table.insert(task_data).execute()
+        # ✅ Insertar SIN await
+        response = tasks_table.insert(task_data).execute()
         
         if not response.data or len(response.data) == 0:
             raise HTTPException(
@@ -231,19 +239,7 @@ async def create_task(
         
         logger.info(f"✅ Tarea creada: {created_task['id']}")
         
-        return Task(
-            id=created_task["id"],
-            user_id=created_task["user_id"],
-            title=created_task["title"],
-            description=created_task.get("description"),
-            completed=created_task.get("completed", False),
-            priority=created_task.get("priority", "media"),
-            due_date=created_task.get("due_date"),
-            category=created_task.get("category"),
-            tags=created_task.get("tags", []),
-            created_at=created_task["created_at"],
-            updated_at=created_task.get("updated_at")
-        )
+        return _task_to_response(created_task)
         
     except HTTPException:
         raise
@@ -267,10 +263,10 @@ async def get_task(
     logger.info(f"🔍 Obteniendo tarea {task_id} para usuario {user_id}")
     
     try:
-        # ✅ CORREGIDO: Sin await
         tasks_table = get_tasks_table()
         
-        response = await tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
+        # ✅ Ejecutar SIN await
+        response = tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
         
         if not response.data or len(response.data) == 0:
             raise HTTPException(
@@ -278,21 +274,7 @@ async def get_task(
                 detail="Tarea no encontrada"
             )
         
-        task_data = response.data[0]
-        
-        return Task(
-            id=task_data["id"],
-            user_id=task_data["user_id"],
-            title=task_data["title"],
-            description=task_data.get("description"),
-            completed=task_data.get("completed", False),
-            priority=task_data.get("priority", "media"),
-            due_date=task_data.get("due_date"),
-            category=task_data.get("category"),
-            tags=task_data.get("tags", []),
-            created_at=task_data["created_at"],
-            updated_at=task_data.get("updated_at")
-        )
+        return _task_to_response(response.data[0])
         
     except HTTPException:
         raise
@@ -317,11 +299,10 @@ async def update_task(
     logger.info(f"✏️ Actualizando tarea {task_id} para usuario {user_id}")
     
     try:
-        # ✅ CORREGIDO: Sin await
         tasks_table = get_tasks_table()
         
         # Verificar que la tarea existe y pertenece al usuario
-        check_response = await tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
+        check_response = tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
         
         if not check_response.data or len(check_response.data) == 0:
             raise HTTPException(
@@ -345,14 +326,17 @@ async def update_task(
             update_data["category"] = task_update.category
         if task_update.tags is not None:
             update_data["tags"] = task_update.tags
+        if task_update.color is not None:
+            update_data["color"] = task_update.color
         
         update_data["updated_at"] = datetime.now().isoformat()
         
         if not update_data:
-            return await get_task(task_id, current_user)
+            task_data = check_response.data[0]
+            return _task_to_response(task_data)
         
-        # Actualizar en la base de datos
-        response = await tasks_table.update(update_data).eq("id", task_id).execute()
+        # ✅ Actualizar SIN await
+        response = tasks_table.update(update_data).eq("id", task_id).execute()
         
         if not response.data or len(response.data) == 0:
             raise HTTPException(
@@ -360,23 +344,9 @@ async def update_task(
                 detail="Error al actualizar la tarea"
             )
         
-        updated_task = response.data[0]
-        
         logger.info(f"✅ Tarea actualizada: {task_id}")
         
-        return Task(
-            id=updated_task["id"],
-            user_id=updated_task["user_id"],
-            title=updated_task["title"],
-            description=updated_task.get("description"),
-            completed=updated_task.get("completed", False),
-            priority=updated_task.get("priority", "media"),
-            due_date=updated_task.get("due_date"),
-            category=updated_task.get("category"),
-            tags=updated_task.get("tags", []),
-            created_at=updated_task["created_at"],
-            updated_at=updated_task.get("updated_at")
-        )
+        return _task_to_response(response.data[0])
         
     except HTTPException:
         raise
@@ -400,11 +370,10 @@ async def delete_task(
     logger.info(f"🗑️ Eliminando tarea {task_id} para usuario {user_id}")
     
     try:
-        # ✅ CORREGIDO: Sin await
         tasks_table = get_tasks_table()
         
         # Verificar que la tarea existe y pertenece al usuario
-        check_response = await tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
+        check_response = tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
         
         if not check_response.data or len(check_response.data) == 0:
             raise HTTPException(
@@ -412,8 +381,8 @@ async def delete_task(
                 detail="Tarea no encontrada"
             )
         
-        # Eliminar la tarea
-        await tasks_table.delete().eq("id", task_id).execute()
+        # ✅ Eliminar SIN await
+        tasks_table.delete().eq("id", task_id).execute()
         
         logger.info(f"✅ Tarea eliminada: {task_id}")
         
@@ -444,11 +413,10 @@ async def get_task_stats(
     logger.info(f"📊 Obteniendo estadísticas para usuario {user_id}")
     
     try:
-        # ✅ CORREGIDO: Sin await
         tasks_table = get_tasks_table()
         
-        # Obtener todas las tareas del usuario
-        response = await tasks_table.select("*").eq("user_id", user_id).execute()
+        # ✅ Ejecutar SIN await
+        response = tasks_table.select("*").eq("user_id", user_id).execute()
         
         tasks = response.data
         
@@ -533,11 +501,10 @@ async def toggle_task_complete(
     logger.info(f"🔄 Alternando estado de tarea {task_id}")
     
     try:
-        # ✅ CORREGIDO: Sin await
         tasks_table = get_tasks_table()
         
         # Obtener la tarea actual
-        response = await tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
+        response = tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
         
         if not response.data or len(response.data) == 0:
             raise HTTPException(
@@ -548,8 +515,8 @@ async def toggle_task_complete(
         current_task = response.data[0]
         new_completed = not current_task.get("completed", False)
         
-        # Actualizar
-        update_response = await tasks_table.update({
+        # ✅ Actualizar SIN await
+        update_response = tasks_table.update({
             "completed": new_completed,
             "updated_at": datetime.now().isoformat()
         }).eq("id", task_id).execute()
@@ -560,21 +527,7 @@ async def toggle_task_complete(
                 detail="Error al actualizar la tarea"
             )
         
-        updated_task = update_response.data[0]
-        
-        return Task(
-            id=updated_task["id"],
-            user_id=updated_task["user_id"],
-            title=updated_task["title"],
-            description=updated_task.get("description"),
-            completed=updated_task.get("completed", False),
-            priority=updated_task.get("priority", "media"),
-            due_date=updated_task.get("due_date"),
-            category=updated_task.get("category"),
-            tags=updated_task.get("tags", []),
-            created_at=updated_task["created_at"],
-            updated_at=updated_task.get("updated_at")
-        )
+        return _task_to_response(update_response.data[0])
         
     except HTTPException:
         raise
@@ -597,16 +550,15 @@ async def clear_completed_tasks(
     logger.info(f"🧹 Eliminando tareas completadas para usuario {user_id}")
     
     try:
-        # ✅ CORREGIDO: Sin await
         tasks_table = get_tasks_table()
         
-        # Contar cuántas tareas completadas hay
-        count_response = await tasks_table.select("*", count="exact").eq("user_id", user_id).eq("completed", True).execute()
+        # ✅ Contar SIN await
+        count_response = tasks_table.select("*", count="exact").eq("user_id", user_id).eq("completed", True).execute()
         
         completed_count = count_response.count if hasattr(count_response, 'count') else 0
         
-        # Eliminar tareas completadas
-        await tasks_table.delete().eq("user_id", user_id).eq("completed", True).execute()
+        # ✅ Eliminar SIN await
+        tasks_table.delete().eq("user_id", user_id).eq("completed", True).execute()
         
         logger.info(f"✅ {completed_count} tareas completadas eliminadas")
         
