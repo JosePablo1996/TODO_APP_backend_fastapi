@@ -4,6 +4,7 @@ Servicio para manejar WebAuthn/Passkeys
 import base64
 import json
 import logging
+import os
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta
 from webauthn import (
@@ -36,15 +37,37 @@ class WebAuthnService:
         self.rp_id = frontend_url.replace("https://", "").replace("http://", "").split(":")[0]
         self.rp_name = settings.API_TITLE
         self.origin = settings.FRONTEND_URL
+        
+        # ✅ CORREGIDO: Si el RP_ID es localhost, verificar si estamos en Render
+        if self.rp_id == "localhost" or self.rp_id == "*" or not self.rp_id:
+            render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
+            if render_host:
+                # Estamos en Render, usar el dominio real
+                self.rp_id = render_host
+                self.origin = f"https://{render_host}"
+                logger.info(f"🔄 [WEBAUTHN] Detectado entorno Render")
+                logger.info(f"   RP ID: {self.rp_id}")
+                logger.info(f"   Origin: {self.origin}")
+            else:
+                # Desarrollo local
+                self.rp_id = "localhost"
+                self.origin = "http://localhost:5173"
+                logger.info(f"🏠 [WEBAUTHN] Usando configuración local")
+                logger.info(f"   RP ID: {self.rp_id}")
+                logger.info(f"   Origin: {self.origin}")
+        else:
+            logger.info(f"🌐 [WEBAUTHN] Usando dominio configurado")
+            logger.info(f"   RP ID: {self.rp_id}")
+            logger.info(f"   Origin: {self.origin}")
 
         # Almacenamiento de challenges (en producción usar Redis o DB)
         self.registration_challenges: Dict[str, Dict[str, Any]] = {}
         self.authentication_challenges: Dict[str, Dict[str, Any]] = {}
 
         logger.info(f"✅ WebAuthnService inicializado")
-        logger.info(f"   RP ID: {self.rp_id}")
+        logger.info(f"   RP ID final: {self.rp_id}")
         logger.info(f"   RP Name: {self.rp_name}")
-        logger.info(f"   Origin: {self.origin}")
+        logger.info(f"   Origin final: {self.origin}")
 
     def _encode_credential_id(self, credential_id: bytes) -> str:
         """Codifica credential_id a base64url"""
@@ -280,6 +303,8 @@ class WebAuthnService:
         logger.debug(f"   Email: {email}")
         logger.debug(f"   Username: {username}")
         logger.debug(f"   Device name: {device_name}")
+        logger.debug(f"   RP ID: {self.rp_id}")
+        logger.debug(f"   Origin: {self.origin}")
 
         # Limpiar challenges expirados
         self._cleanup_expired_challenges()
@@ -360,6 +385,8 @@ class WebAuthnService:
         
         logger.info(f"   📝 Challenge almacenado (string): {stored_challenge_string[:50]}...")
         logger.info(f"   📝 Challenge almacenado (bytes): {stored_challenge_bytes[:20]}...")
+        logger.info(f"   🌐 RP ID para verificación: {self.rp_id}")
+        logger.info(f"   🌐 Origin para verificación: {self.origin}")
         
         # ✅ VERIFICAR QUE EL STRING COINCIDE
         if challenge != stored_challenge_string:
@@ -451,6 +478,7 @@ class WebAuthnService:
         logger.debug(f"   User ID: {user_id}")
         logger.debug(f"   Credenciales permitidas: {len(allowed_credentials) if allowed_credentials else 0}")
         logger.debug(f"   RP ID: {self.rp_id}")
+        logger.debug(f"   Origin: {self.origin}")
 
         # Limpiar challenges expirados
         self._cleanup_expired_challenges()
@@ -518,6 +546,8 @@ class WebAuthnService:
         logger.info(f"🔐 Verificando autenticación")
         logger.debug(f"   Credential ID: {credential_id[:20]}...")
         logger.debug(f"   Challenge recibido: {challenge[:30]}...")
+        logger.debug(f"   RP ID: {self.rp_id}")
+        logger.debug(f"   Origin: {self.origin}")
 
         try:
             # ✅ OBTENER EL CHALLENGE ALMACENADO
@@ -526,6 +556,7 @@ class WebAuthnService:
             
             if not stored_data:
                 logger.error(f"❌ No se encontró challenge almacenado para sesión: {session_id}")
+                logger.info(f"   🔍 Sesiones almacenadas: {list(self.authentication_challenges.keys())}")
                 return False, None, "No se encontró challenge para verificación"
             
             stored_challenge_string = stored_data["challenge"]
@@ -536,6 +567,8 @@ class WebAuthnService:
             # Verificar que el string coincide
             if challenge != stored_challenge_string:
                 logger.error(f"❌ Challenge no coincide")
+                logger.error(f"   Recibido: {challenge}")
+                logger.error(f"   Almacenado: {stored_challenge_string}")
                 return False, None, "Challenge no coincide"
             
             logger.debug("   ✅ Challenge verificado correctamente")
