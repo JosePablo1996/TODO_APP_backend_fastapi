@@ -32,42 +32,40 @@ class WebAuthnService:
     """Servicio para manejar WebAuthn/Passkeys"""
 
     def __init__(self):
-        # Extraer RP ID del FRONTEND_URL
+        # Obtener FRONTEND_URL de settings
         frontend_url = settings.FRONTEND_URL
-        self.rp_id = frontend_url.replace("https://", "").replace("http://", "").split(":")[0]
-        self.rp_name = settings.API_TITLE
-        self.origin = settings.FRONTEND_URL
         
-        # ✅ CORREGIDO: Si el RP_ID es localhost, verificar si estamos en Render
-        if self.rp_id == "localhost" or self.rp_id == "*" or not self.rp_id:
-            render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
-            if render_host:
-                # Estamos en Render, usar el dominio real
-                self.rp_id = render_host
-                self.origin = f"https://{render_host}"
-                logger.info(f"🔄 [WEBAUTHN] Detectado entorno Render")
-                logger.info(f"   RP ID: {self.rp_id}")
-                logger.info(f"   Origin: {self.origin}")
-            else:
-                # Desarrollo local
-                self.rp_id = "localhost"
-                self.origin = "http://localhost:5173"
-                logger.info(f"🏠 [WEBAUTHN] Usando configuración local")
-                logger.info(f"   RP ID: {self.rp_id}")
-                logger.info(f"   Origin: {self.origin}")
+        # ✅ CORREGIDO: Detectar automáticamente el entorno
+        render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
+        is_render = bool(render_host)
+        
+        if is_render:
+            # Estamos en Render - usar el dominio de Render
+            self.rp_id = render_host
+            self.origin = f"https://{render_host}"
+            logger.info(f"🔄 [WEBAUTHN] Detectado entorno Render")
+        elif frontend_url and "localhost" not in frontend_url:
+            # Usar el FRONTEND_URL configurado si no es localhost
+            self.rp_id = frontend_url.replace("https://", "").replace("http://", "").split(":")[0]
+            self.origin = frontend_url
+            logger.info(f"🌐 [WEBAUTHN] Usando FRONTEND_URL configurado")
         else:
-            logger.info(f"🌐 [WEBAUTHN] Usando dominio configurado")
-            logger.info(f"   RP ID: {self.rp_id}")
-            logger.info(f"   Origin: {self.origin}")
+            # Desarrollo local
+            self.rp_id = "localhost"
+            self.origin = "http://localhost:5173"
+            logger.info(f"🏠 [WEBAUTHN] Usando configuración local")
+        
+        self.rp_name = settings.API_TITLE
 
         # Almacenamiento de challenges (en producción usar Redis o DB)
         self.registration_challenges: Dict[str, Dict[str, Any]] = {}
         self.authentication_challenges: Dict[str, Dict[str, Any]] = {}
 
         logger.info(f"✅ WebAuthnService inicializado")
-        logger.info(f"   RP ID final: {self.rp_id}")
+        logger.info(f"   RP ID: {self.rp_id}")
         logger.info(f"   RP Name: {self.rp_name}")
-        logger.info(f"   Origin final: {self.origin}")
+        logger.info(f"   Origin: {self.origin}")
+        logger.info(f"   Entorno: {'Render' if is_render else 'Local'}")
 
     def _encode_credential_id(self, credential_id: bytes) -> str:
         """Codifica credential_id a base64url"""
@@ -288,7 +286,7 @@ class WebAuthnService:
             return False
 
     # ============================================
-    # GENERAR OPCIONES DE REGISTRO CON ALMACENAMIENTO DE CHALLENGE
+    # GENERAR OPCIONES DE REGISTRO
     # ============================================
 
     async def generate_registration_options(
@@ -327,7 +325,7 @@ class WebAuthnService:
             # Convertir challenge a base64url string
             challenge_b64 = base64.urlsafe_b64encode(registration_options.challenge).decode('utf-8').rstrip('=')
 
-            # ✅ ALMACENAR EL CHALLENGE PARA VERIFICAR DESPUÉS (guardar tanto string como bytes)
+            # Almacenar el challenge para verificar después
             self.registration_challenges[user_id] = {
                 "challenge": challenge_b64,
                 "challenge_bytes": registration_options.challenge,
@@ -336,7 +334,6 @@ class WebAuthnService:
             
             logger.debug(f"   ✅ Challenge almacenado para usuario: {user_id}")
             logger.debug(f"   Challenge (string): {challenge_b64[:30]}...")
-            logger.debug(f"   Challenge (bytes): {registration_options.challenge[:20]}...")
             logger.debug(f"   Timeout: {registration_options.timeout}")
 
             return {
@@ -358,7 +355,7 @@ class WebAuthnService:
             raise
 
     # ============================================
-    # VERIFICAR REGISTRO - VERSIÓN CORREGIDA
+    # VERIFICAR REGISTRO
     # ============================================
 
     async def verify_registration(
@@ -373,7 +370,7 @@ class WebAuthnService:
         logger.info(f"🔐 Verificando registro para usuario: {user_id}")
         logger.info(f"   📝 Challenge recibido (string): {challenge[:50]}...")
         
-        # ✅ OBTENER EL CHALLENGE ALMACENADO
+        # Obtener el challenge almacenado
         stored_data = self.registration_challenges.get(user_id)
         if not stored_data:
             logger.error(f"❌ No se encontró challenge almacenado para usuario: {user_id}")
@@ -384,11 +381,10 @@ class WebAuthnService:
         stored_challenge_bytes = stored_data["challenge_bytes"]
         
         logger.info(f"   📝 Challenge almacenado (string): {stored_challenge_string[:50]}...")
-        logger.info(f"   📝 Challenge almacenado (bytes): {stored_challenge_bytes[:20]}...")
         logger.info(f"   🌐 RP ID para verificación: {self.rp_id}")
         logger.info(f"   🌐 Origin para verificación: {self.origin}")
         
-        # ✅ VERIFICAR QUE EL STRING COINCIDE
+        # Verificar que el string coincide
         if challenge != stored_challenge_string:
             logger.error(f"❌ Challenge string no coincide")
             logger.error(f"   Recibido: {challenge}")
@@ -420,11 +416,9 @@ class WebAuthnService:
 
             logger.debug("   Credential dict creado correctamente")
 
-            # ✅ USAR EL CHALLENGE EN BYTES PARA LA VERIFICACIÓN
-            logger.debug("   Verificando respuesta de registro con challenge en bytes...")
+            # Verificar respuesta de registro
+            logger.debug("   Verificando respuesta de registro...")
             
-            # La función retorna directamente el objeto con los atributos
-            # Si falla, lanza una excepción
             verification = verify_registration_response(
                 credential=credential_dict,
                 expected_challenge=stored_challenge_bytes,
@@ -434,9 +428,6 @@ class WebAuthnService:
             )
 
             logger.debug(f"   Verificación completada exitosamente")
-            logger.debug(f"   Credential ID obtenido: {verification.credential_id[:20]}...")
-            
-            # ✅ Si llegamos aquí, la verificación fue exitosa
             logger.info(f"✅ Registro verificado para usuario {user_id}")
 
             public_key = verification.credential_public_key
@@ -446,7 +437,7 @@ class WebAuthnService:
             logger.debug(f"   Public key length: {len(public_key)}")
             logger.debug(f"   Sign count: {sign_count}")
 
-            # ✅ LIMPIAR CHALLENGE ALMACENADO
+            # Limpiar challenge almacenado
             del self.registration_challenges[user_id]
 
             credential_data = {
@@ -484,7 +475,6 @@ class WebAuthnService:
         self._cleanup_expired_challenges()
 
         try:
-            # Preparar lista de credenciales permitidas
             allow_credentials = None
             if allowed_credentials:
                 allow_credentials = [
@@ -493,7 +483,6 @@ class WebAuthnService:
                 ]
                 logger.debug(f"   {len(allow_credentials)} credenciales formateadas")
 
-            # Generar opciones de autenticación
             logger.debug("   Generando opciones de autenticación...")
             auth_options = generate_authentication_options(
                 rp_id=self.rp_id,
@@ -501,10 +490,8 @@ class WebAuthnService:
                 user_verification=UserVerificationRequirement.PREFERRED
             )
 
-            # Convertir challenge a base64url string
             challenge_b64 = base64.urlsafe_b64encode(auth_options.challenge).decode('utf-8').rstrip('=')
 
-            # ✅ ALMACENAR EL CHALLENGE PARA VERIFICAR DESPUÉS
             session_id = user_id or "anonymous"
             self.authentication_challenges[session_id] = {
                 "challenge": challenge_b64,
@@ -514,8 +501,6 @@ class WebAuthnService:
             }
 
             logger.debug(f"   ✅ Challenge almacenado para sesión: {session_id}")
-            logger.debug(f"   Challenge: {challenge_b64[:30]}...")
-            logger.debug(f"   Timeout: {auth_options.timeout}")
 
             return {
                 "challenge": challenge_b64,
@@ -529,7 +514,7 @@ class WebAuthnService:
             raise
 
     # ============================================
-    # VERIFICAR AUTENTICACIÓN - VERSIÓN CORREGIDA
+    # VERIFICAR AUTENTICACIÓN
     # ============================================
 
     async def verify_authentication(
@@ -550,7 +535,6 @@ class WebAuthnService:
         logger.debug(f"   Origin: {self.origin}")
 
         try:
-            # ✅ OBTENER EL CHALLENGE ALMACENADO
             session_id = user_id or "anonymous"
             stored_data = self.authentication_challenges.get(session_id)
             
@@ -562,13 +546,8 @@ class WebAuthnService:
             stored_challenge_string = stored_data["challenge"]
             stored_challenge_bytes = stored_data["challenge_bytes"]
             
-            logger.debug(f"   Challenge almacenado (string): {stored_challenge_string[:30]}...")
-            
-            # Verificar que el string coincide
             if challenge != stored_challenge_string:
                 logger.error(f"❌ Challenge no coincide")
-                logger.error(f"   Recibido: {challenge}")
-                logger.error(f"   Almacenado: {stored_challenge_string}")
                 return False, None, "Challenge no coincide"
             
             logger.debug("   ✅ Challenge verificado correctamente")
@@ -581,12 +560,10 @@ class WebAuthnService:
             signature_bytes = base64.urlsafe_b64decode(signature + '==')
             credential_id_bytes = base64.urlsafe_b64decode(credential_id + '==')
 
-            # Decodificar public_key almacenada
             public_key_bytes = base64.b64decode(stored_credential["public_key"])
             
             logger.debug("   ✅ Datos decodificados correctamente")
 
-            # Estructura completa con id y rawId
             credential_dict = {
                 "id": credential_id,
                 "rawId": credential_id,
@@ -598,9 +575,6 @@ class WebAuthnService:
                 }
             }
 
-            logger.debug("   Credential dict creado correctamente")
-
-            # ✅ USAR EL CHALLENGE EN BYTES PARA LA VERIFICACIÓN
             logger.debug("   Verificando respuesta de autenticación...")
             
             verification = verify_authentication_response(
@@ -613,11 +587,9 @@ class WebAuthnService:
                 require_user_verification=True,
             )
 
-            logger.debug(f"   Verificación completada exitosamente")
             logger.info(f"✅ Autenticación verificada exitosamente")
             logger.debug(f"   Nuevo sign_count: {verification.new_sign_count}")
             
-            # Limpiar challenge almacenado
             if session_id in self.authentication_challenges:
                 del self.authentication_challenges[session_id]
             
