@@ -34,26 +34,30 @@ class WebAuthnService:
     def __init__(self):
         # Obtener FRONTEND_URL de settings
         frontend_url = settings.FRONTEND_URL
-        
-        # ✅ CORREGIDO: Detectar automáticamente el entorno
         render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
         is_render = bool(render_host)
         
-        if is_render:
-            # Estamos en Render - usar el dominio de Render
+        # ✅ CORREGIDO: Si FRONTEND_URL contiene localhost, usar localhost primero
+        if frontend_url and "localhost" in frontend_url:
+            # Desarrollo local o Render configurado para aceptar localhost
+            self.rp_id = "localhost"
+            self.origin = frontend_url  # "http://localhost:5173"
+            logger.info(f"🏠 [WEBAUTHN] Usando configuración local (FRONTEND_URL={frontend_url})")
+        elif is_render:
+            # Estamos en Render sin FRONTEND_URL localhost
             self.rp_id = render_host
             self.origin = f"https://{render_host}"
-            logger.info(f"🔄 [WEBAUTHN] Detectado entorno Render")
-        elif frontend_url and "localhost" not in frontend_url:
+            logger.info(f"🔄 [WEBAUTHN] Detectado entorno Render (sin localhost)")
+        elif frontend_url:
             # Usar el FRONTEND_URL configurado si no es localhost
             self.rp_id = frontend_url.replace("https://", "").replace("http://", "").split(":")[0]
             self.origin = frontend_url
-            logger.info(f"🌐 [WEBAUTHN] Usando FRONTEND_URL configurado")
+            logger.info(f"🌐 [WEBAUTHN] Usando FRONTEND_URL configurado: {frontend_url}")
         else:
-            # Desarrollo local
+            # Desarrollo local por defecto
             self.rp_id = "localhost"
             self.origin = "http://localhost:5173"
-            logger.info(f"🏠 [WEBAUTHN] Usando configuración local")
+            logger.info(f"🏠 [WEBAUTHN] Usando configuración por defecto (localhost)")
         
         self.rp_name = settings.API_TITLE
 
@@ -66,6 +70,8 @@ class WebAuthnService:
         logger.info(f"   RP Name: {self.rp_name}")
         logger.info(f"   Origin: {self.origin}")
         logger.info(f"   Entorno: {'Render' if is_render else 'Local'}")
+        logger.info(f"   FRONTEND_URL: {frontend_url}")
+        logger.info(f"   RENDER_EXTERNAL_HOSTNAME: {render_host or 'No disponible'}")
 
     def _encode_credential_id(self, credential_id: bytes) -> str:
         """Codifica credential_id a base64url"""
