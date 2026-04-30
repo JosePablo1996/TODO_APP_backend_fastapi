@@ -65,10 +65,8 @@ class WebAuthnService:
             "https://todo-app-backend-fastapi-klh2.onrender.com",
             "android:apk-key-hash:com.todoappmanager.flutter",
         ]
-        # Eliminar duplicados manteniendo el orden
         self.allowed_origins = list(dict.fromkeys(self.allowed_origins))
 
-        # Almacenamiento de challenges (en producción usar Redis o DB)
         self.registration_challenges: Dict[str, Dict[str, Any]] = {}
         self.authentication_challenges: Dict[str, Dict[str, Any]] = {}
 
@@ -78,8 +76,6 @@ class WebAuthnService:
         logger.info(f"   Origin principal: {self.origin}")
         logger.info(f"   Orígenes permitidos: {self.allowed_origins}")
         logger.info(f"   Entorno: {'Render' if is_render else 'Local'}")
-        logger.info(f"   FRONTEND_URL: {frontend_url}")
-        logger.info(f"   RENDER_EXTERNAL_HOSTNAME: {render_host or 'No disponible'}")
 
     def _encode_credential_id(self, credential_id: bytes) -> str:
         """Codifica credential_id a base64url"""
@@ -339,7 +335,7 @@ class WebAuthnService:
             raise
 
     # ============================================
-    # VERIFICAR REGISTRO (CON MÚLTIPLES ORÍGENES)
+    # VERIFICAR REGISTRO (CON SOPORTE JSON + CBOR)
     # ============================================
 
     async def verify_registration(
@@ -350,7 +346,7 @@ class WebAuthnService:
         attestation_object: str,
         challenge: str
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
-        """Verifica la respuesta de registro de passkey"""
+        """Verifica la respuesta de registro de passkey (soporta JSON y CBOR)"""
         logger.info(f"🔐 Verificando registro para usuario: {user_id}")
         
         stored_data = self.registration_challenges.get(user_id)
@@ -370,22 +366,134 @@ class WebAuthnService:
         
         logger.info("   ✅ Challenge verificado correctamente")
         
-        # ✅ Intentar verificar con cada origen permitido
+        try:
+            # Decodificar attestation_object
+            padding = 4 - (len(attestation_object) % 4)
+            if padding != 4:
+                attestation_object += '=' * padding
+            attestation_object_bytes = base64.urlsafe_b64decode(attestation_object)
+            
+            # ✅ Intentar detectar si es JSON (Flutter) o CBOR (Web)
+            try:
+                decoded_text = attestation_object_bytes.decode('utf-8')
+                if decoded_text.startswith('{'):
+                    # Es JSON de Flutter
+                    logger.info("   📱 Detectado formato JSON (Flutter)")
+                    return await self._verify_registration_json(
+                        user_id=user_id,
+                        credential_id=credential_id,
+                        client_data_json=client_data_json,
+                        attestation_json=decoded_text,
+                        stored_challenge_bytes=stored_challenge_bytes,
+                    )
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass
+            
+            # Es CBOR (Web)
+            logger.info("   🌐 Detectado formato CBOR (Web)")
+            return await self._verify_registration_cbor(
+                user_id=user_id,
+                credential_id=credential_id,
+                client_data_json=client_data_json,
+                attestation_object=attestation_object,
+                stored_challenge_bytes=stored_challenge_bytes,
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Error verificando registro: {str(e)}", exc_info=True)
+            return False, None, str(e)
+
+    async def _verify_registration_json(
+        self,
+        user_id: str,
+        credential_id: str,
+        client_data_json: str,
+        attestation_json: str,
+        stored_challenge_bytes: bytes,
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        """Verifica registro desde formato JSON (Flutter)"""
+        try:
+            attestation_data = json.loads(attestation_json)
+            auth_data_b64 = attestation_data.get('authData', '')
+            
+            logger.debug(f"   authData (Base64URL): {auth_data_b64[:30]}...")
+            
+            # El authData ya viene en Base64URL, lo usamos directamente
+            # Reconstruir el credential dict para verify_registration_response
+            credential_dict = {
+                "id": credential_id,
+                "rawId": credential_id,
+                "type": "public-key",
+                "response": {
+                    "clientDataJSON": client_data_json,
+                    "attestationObject": attestation_json.encode('utf-8'),
+                }
+            }
+            
+            # Intentar con cada origen permitido
+            last_error = None
+            for origin in self.allowed_origins:
+                try:
+                    logger.debug(f"   Intentando verificar con origin: {origin}")
+                    
+                    verification = verify_registration_response(
+                        credential=credential_dict,
+                        expected_challenge=stored_challenge_bytes,
+                        expected_rp_id=self.rp_id,
+                        expected_origin=origin,
+                        require_user_verification=True,
+                    )
+                    
+                    logger.info(f"✅ Registro JSON verificado con origin: {origin}")
+                    
+                    public_key = verification.credential_public_key
+                    sign_count = verification.sign_count
+                    
+                    del self.registration_challenges[user_id]
+                    
+                    return True, {
+                        "credential_id": credential_id,
+                        "public_key": public_key,
+                        "sign_count": sign_count
+                    }, None
+                    
+                except Exception as e:
+                    last_error = str(e)
+                    logger.debug(f"   ❌ Falló con origin '{origin}': {last_error[:100]}")
+                    continue
+            
+            logger.error(f"❌ Todos los orígenes fallaron. Último error: {last_error}")
+            return False, None, f"Verificación JSON fallida: {last_error}"
+            
+        except Exception as e:
+            logger.error(f"❌ Error en verificación JSON: {str(e)}")
+            return False, None, str(e)
+
+    async def _verify_registration_cbor(
+        self,
+        user_id: str,
+        credential_id: str,
+        client_data_json: str,
+        attestation_object: str,
+        stored_challenge_bytes: bytes,
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        """Verifica registro desde formato CBOR (Web)"""
         last_error = None
+        
+        credential_dict = {
+            "id": credential_id,
+            "rawId": credential_id,
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": client_data_json,
+                "attestationObject": attestation_object,
+            }
+        }
+        
         for origin in self.allowed_origins:
             try:
-                logger.debug(f"   Intentando verificar con origin: {origin}")
+                logger.debug(f"   Intentando verificar CBOR con origin: {origin}")
                 
-                credential_dict = {
-                    "id": credential_id,
-                    "rawId": credential_id,
-                    "type": "public-key",
-                    "response": {
-                        "clientDataJSON": client_data_json,
-                        "attestationObject": attestation_object,
-                    }
-                }
-
                 verification = verify_registration_response(
                     credential=credential_dict,
                     expected_challenge=stored_challenge_bytes,
@@ -393,27 +501,27 @@ class WebAuthnService:
                     expected_origin=origin,
                     require_user_verification=True,
                 )
-
-                logger.info(f"✅ Registro verificado con origin: {origin}")
+                
+                logger.info(f"✅ Registro CBOR verificado con origin: {origin}")
                 
                 public_key = verification.credential_public_key
                 sign_count = verification.sign_count
-
+                
                 del self.registration_challenges[user_id]
-
+                
                 return True, {
                     "credential_id": credential_id,
                     "public_key": public_key,
                     "sign_count": sign_count
                 }, None
-
+                
             except Exception as e:
                 last_error = str(e)
                 logger.debug(f"   ❌ Falló con origin '{origin}': {last_error[:100]}")
                 continue
         
         logger.error(f"❌ Todos los orígenes fallaron. Último error: {last_error}")
-        return False, None, f"Verificación fallida: {last_error}"
+        return False, None, f"Verificación CBOR fallida: {last_error}"
 
     # ============================================
     # GENERAR OPCIONES DE AUTENTICACIÓN
@@ -503,23 +611,23 @@ class WebAuthnService:
         
         public_key_bytes = base64.b64decode(stored_credential["public_key"])
         
-        # ✅ Intentar verificar con cada origen permitido
+        credential_dict = {
+            "id": credential_id,
+            "rawId": credential_id,
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": client_data_json,
+                "authenticatorData": authenticator_data,
+                "signature": signature,
+            }
+        }
+        
+        # Intentar con cada origen permitido
         last_error = None
         for origin in self.allowed_origins:
             try:
                 logger.debug(f"   Intentando verificar con origin: {origin}")
                 
-                credential_dict = {
-                    "id": credential_id,
-                    "rawId": credential_id,
-                    "type": "public-key",
-                    "response": {
-                        "clientDataJSON": client_data_json,
-                        "authenticatorData": authenticator_data,
-                        "signature": signature,
-                    }
-                }
-
                 verification = verify_authentication_response(
                     credential=credential_dict,
                     expected_challenge=stored_challenge_bytes,
