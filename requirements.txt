@@ -18,8 +18,8 @@ email-validator==2.2.0
 PyJWT==2.10.1
 cryptography==44.0.2
 
-# ✅ WebAuthn para passkeys - ACTUALIZADO a v3.x
-webauthn>=3.0.0
+# ✅ WebAuthn para passkeys - Última versión estable
+webauthn==2.7.1
 
 # Logging
 loguru==0.7.3
