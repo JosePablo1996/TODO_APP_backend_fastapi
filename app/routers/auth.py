@@ -836,7 +836,6 @@ async def change_password(
 async def send_otp_code(request: OtpSendRequest):
     """
     Envía un código OTP de 6 dígitos al email del usuario.
-    ✅ CORREGIDO: Envía el email ANTES de responder, con manejo de errores.
     """
     logger.info(f"📧 Solicitando código OTP para: {request.email}")
     
@@ -859,36 +858,94 @@ async def send_otp_code(request: OtpSendRequest):
                 detail=f"Has solicitado demasiados códigos. Espera {time_left // 60} minutos."
             )
     
-    # ✅ CORREGIDO: Verificar SMTP usando settings.validate_smtp_config()
-    if not settings.validate_smtp_config():
-        logger.error("❌ Servicio de email no configurado - SMTP no disponible")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="El servicio de envío de correos no está disponible. Por favor, configura SMTP en el servidor."
-        )
-    
-    # Generar código de 6 dígitos
+    # ✅ PRIMERO: Generar el código (antes de cualquier validación)
     code = generate_otp_code()
+    logger.info(f"🔢 Código generado: {code}")
     
-    # ✅ CORREGIDO: Enviar email PRIMERO, antes de guardar el código
-    logger.info(f"📧 Intentando enviar código OTP a {request.email}...")
+    # ✅ SEGUNDO: Verificar SMTP
+    if not settings.validate_smtp_config():
+        logger.warning(f"⚠️ SMTP no configurado correctamente")
+        logger.warning(f"   SMTP_HOST: {settings.SMTP_HOST}")
+        logger.warning(f"   SMTP_PORT: {settings.SMTP_PORT}")
+        logger.warning(f"   SMTP_USER: {settings.SMTP_USER}")
+        logger.warning(f"   SMTP_FROM: {settings.SMTP_FROM}")
+        logger.warning(f"   SMTP_PASSWORD: {'***' if settings.SMTP_PASSWORD else 'NO CONFIGURADA'}")
+        
+        # En desarrollo local, permitir continuar sin SMTP
+        is_dev = "localhost" in settings.FRONTEND_URL or "127.0.0.1" in settings.FRONTEND_URL
+        
+        if is_dev or settings.ENVIRONMENT == "development":
+            logger.warning(f"🔧 MODO DESARROLLO: Código OTP = {code}")
+            otp_storage[request.email] = {
+                "code": code,
+                "expires_at": datetime.now() + timedelta(minutes=15),
+                "attempts": 0
+            }
+            otp_rate_limit[request.email].append(datetime.now())
+            
+            return OtpSendResponse(
+                message=f"🔧 [DEV] Código: {code} - Úsalo para probar",
+                expires_in=900
+            )
+        else:
+            logger.error("❌ Servicio de email no configurado en producción")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="El servicio de envío de correos no está disponible."
+            )
+    
+    # ✅ TERCERO: SMTP configurado - Enviar email
+    logger.info(f"📧 Enviando código OTP a {request.email}...")
     
     try:
         email_sent = await send_otp_email(request.email, code)
         
         if not email_sent:
             logger.error(f"❌ No se pudo enviar el email OTP a {request.email}")
+            
+            # En desarrollo, guardar código aunque falle el email
+            is_dev = "localhost" in settings.FRONTEND_URL or "127.0.0.1" in settings.FRONTEND_URL
+            
+            if is_dev or settings.ENVIRONMENT == "development":
+                logger.warning(f"🔧 [DEV] Código OTP = {code} (email falló)")
+                otp_storage[request.email] = {
+                    "code": code,
+                    "expires_at": datetime.now() + timedelta(minutes=15),
+                    "attempts": 0
+                }
+                otp_rate_limit[request.email].append(datetime.now())
+                return OtpSendResponse(
+                    message=f"🔧 [DEV] Código: {code}",
+                    expires_in=900
+                )
+            
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="No se pudo enviar el código de verificación. Verifica tu dirección de email o intenta más tarde."
             )
+        
+        # ✅ Email enviado exitosamente
+        otp_storage[request.email] = {
+            "code": code,
+            "expires_at": datetime.now() + timedelta(minutes=15),
+            "attempts": 0
+        }
+        otp_rate_limit[request.email].append(datetime.now())
+        
+        logger.info(f"✅ Código OTP enviado a {request.email} (expira en 15 min)")
+        
+        return OtpSendResponse(
+            message="Código enviado exitosamente. Revisa tu correo electrónico.",
+            expires_in=900
+        )
+        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error inesperado enviando email OTP: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error inesperado en send_otp_code: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al enviar el código: {str(e)}"
+            detail=f"Error al procesar la solicitud: {str(e)}"
         )
     
     # ✅ Solo guardar el código si el email se envió exitosamente
@@ -1485,7 +1542,6 @@ async def get_2fa_status(
     except Exception as e:
         logger.error(f"Error obteniendo estado 2FA: {e}")
         return TwoFactorStatusResponse(enabled=False, has_recovery_codes=False)
-
 
 # ============================================
 # ENDPOINTS DE DIAGNÓSTICO
