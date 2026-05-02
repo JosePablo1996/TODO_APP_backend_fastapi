@@ -829,14 +829,14 @@ async def change_password(
 
 
 # ============================================
-# ✅ ENDPOINT OTP CORREGIDO
+# ✅ ENDPOINT OTP CORREGIDO - VERSIÓN FINAL
 # ============================================
 
 @router.post("/otp/send", response_model=OtpSendResponse)
 async def send_otp_code(request: OtpSendRequest):
     """
     Envía un código OTP de 6 dígitos al email del usuario.
-    ✅ CORREGIDO: Ahora envía el email ANTES de responder, y retorna error si falla.
+    ✅ CORREGIDO: Envía el email ANTES de responder, con manejo de errores.
     """
     logger.info(f"📧 Solicitando código OTP para: {request.email}")
     
@@ -859,12 +859,12 @@ async def send_otp_code(request: OtpSendRequest):
                 detail=f"Has solicitado demasiados códigos. Espera {time_left // 60} minutos."
             )
     
-    # Verificar que el servicio de email está configurado
-    if not email_service.is_configured():
-        logger.error("❌ Servicio de email no configurado")
+    # ✅ CORREGIDO: Verificar SMTP usando settings.validate_smtp_config()
+    if not settings.validate_smtp_config():
+        logger.error("❌ Servicio de email no configurado - SMTP no disponible")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="El servicio de envío de correos no está disponible en este momento. Por favor, intenta más tarde."
+            detail="El servicio de envío de correos no está disponible. Por favor, configura SMTP en el servidor."
         )
     
     # Generar código de 6 dígitos
@@ -873,13 +873,22 @@ async def send_otp_code(request: OtpSendRequest):
     # ✅ CORREGIDO: Enviar email PRIMERO, antes de guardar el código
     logger.info(f"📧 Intentando enviar código OTP a {request.email}...")
     
-    email_sent = await send_otp_email(request.email, code)
-    
-    if not email_sent:
-        logger.error(f"❌ No se pudo enviar el email OTP a {request.email}")
+    try:
+        email_sent = await send_otp_email(request.email, code)
+        
+        if not email_sent:
+            logger.error(f"❌ No se pudo enviar el email OTP a {request.email}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="No se pudo enviar el código de verificación. Verifica tu dirección de email o intenta más tarde."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error inesperado enviando email OTP: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="No se pudo enviar el código de verificación. Por favor, verifica tu dirección de email o intenta más tarde."
+            detail=f"Error al enviar el código: {str(e)}"
         )
     
     # ✅ Solo guardar el código si el email se envió exitosamente
