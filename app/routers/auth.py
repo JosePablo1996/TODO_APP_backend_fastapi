@@ -88,9 +88,10 @@ def clean_rate_limit():
             del otp_rate_limit[email]
 
 
-async def send_otp_email(to_email: str, code: str):
+async def send_otp_email(to_email: str, code: str) -> bool:
     """
-    Envía el código OTP por email usando el servicio de email existente
+    Envía el código OTP por email usando el servicio de email existente.
+    ✅ CORREGIDO: Ahora retorna bool para saber si el envío fue exitoso.
     """
     try:
         # Obtener nombre del usuario si existe
@@ -189,16 +190,24 @@ async def send_otp_email(to_email: str, code: str):
         </html>
         """
         
-        await email_service.send_email(
+        # ✅ CORREGIDO: Ahora verificamos si el envío fue exitoso
+        email_sent = await email_service.send_email(
             to_email=to_email,
             subject="🔐 Tu código de acceso a TodoApp",
             body=f"Tu código de verificación es: {code}\n\nEste código expirará en 15 minutos.\n\nSi no solicitaste este código, ignora este mensaje.",
             html_body=html_content
         )
-        logger.info(f"📧 Código OTP enviado a {to_email}")
+        
+        if email_sent:
+            logger.info(f"📧 Código OTP enviado exitosamente a {to_email}")
+            return True
+        else:
+            logger.error(f"❌ Error enviando email OTP a {to_email}: El servicio de email retornó False")
+            return False
+            
     except Exception as e:
         logger.error(f"❌ Error enviando email OTP: {e}")
-        # No fallar si el email no se envía, solo loguear
+        return False
 
 
 # ============================================
@@ -819,10 +828,15 @@ async def change_password(
         )
 
 
+# ============================================
+# ✅ ENDPOINT OTP CORREGIDO
+# ============================================
+
 @router.post("/otp/send", response_model=OtpSendResponse)
 async def send_otp_code(request: OtpSendRequest):
     """
     Envía un código OTP de 6 dígitos al email del usuario.
+    ✅ CORREGIDO: Ahora envía el email ANTES de responder, y retorna error si falla.
     """
     logger.info(f"📧 Solicitando código OTP para: {request.email}")
     
@@ -835,7 +849,7 @@ async def send_otp_code(request: OtpSendRequest):
         del otp_storage[request.email]
         logger.info(f"🗑️ Código anterior eliminado para {request.email}")
     
-    # Rate limiting: máximo 3 intentos por hora
+    # Rate limiting: máximo 3 solicitudes por hora
     if len(otp_rate_limit[request.email]) >= 3:
         oldest = min(otp_rate_limit[request.email])
         time_left = 3600 - (datetime.now() - oldest).seconds
@@ -845,10 +859,30 @@ async def send_otp_code(request: OtpSendRequest):
                 detail=f"Has solicitado demasiados códigos. Espera {time_left // 60} minutos."
             )
     
+    # Verificar que el servicio de email está configurado
+    if not email_service.is_configured():
+        logger.error("❌ Servicio de email no configurado")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El servicio de envío de correos no está disponible en este momento. Por favor, intenta más tarde."
+        )
+    
     # Generar código de 6 dígitos
     code = generate_otp_code()
     
-    # Guardar código en almacenamiento temporal
+    # ✅ CORREGIDO: Enviar email PRIMERO, antes de guardar el código
+    logger.info(f"📧 Intentando enviar código OTP a {request.email}...")
+    
+    email_sent = await send_otp_email(request.email, code)
+    
+    if not email_sent:
+        logger.error(f"❌ No se pudo enviar el email OTP a {request.email}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="No se pudo enviar el código de verificación. Por favor, verifica tu dirección de email o intenta más tarde."
+        )
+    
+    # ✅ Solo guardar el código si el email se envió exitosamente
     otp_storage[request.email] = {
         "code": code,
         "expires_at": datetime.now() + timedelta(minutes=15),
@@ -858,11 +892,7 @@ async def send_otp_code(request: OtpSendRequest):
     # Registrar rate limit
     otp_rate_limit[request.email].append(datetime.now())
     
-    # Enviar email en segundo plano
-    import asyncio
-    asyncio.create_task(send_otp_email(request.email, code))
-    
-    logger.info(f"✅ Código OTP generado para {request.email} (expira en 15 min)")
+    logger.info(f"✅ Código OTP generado y enviado a {request.email} (expira en 15 min)")
     
     return OtpSendResponse(
         message="Código enviado exitosamente. Revisa tu correo electrónico.",
