@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # ============================================
+    # ✅ NUEVO: ENVIRONMENT CONFIGURATION
+    # ============================================
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "production")
+
+    # ============================================
     # STORAGE CONFIGURATION
     # ============================================
     SUPABASE_BUCKET_AVATARS: str = os.getenv("SUPABASE_BUCKET_AVATARS", "avatars")

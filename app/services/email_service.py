@@ -56,7 +56,8 @@ class EmailService:
     
     def _send_email(self, to_email: str, subject: str, html_content: str) -> bool:
         """
-        Método interno para enviar email
+        Método interno para enviar email.
+        ✅ Soporta SSL (puerto 465) y TLS (puerto 587).
         """
         if not self._configured:
             logger.error("❌ SMTP no configurado. No se puede enviar el email.")
@@ -70,8 +71,19 @@ class EmailService:
             
             msg.attach(MIMEText(html_content, "html"))
             
-            server = smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=30)
-            server.starttls()
+            logger.info(f"📧 Conectando a {self.smtp_host}:{self.smtp_port}...")
+            
+            # ✅ CORREGIDO: Usar SSL para puerto 465, TLS para puerto 587
+            if self.smtp_port == 465:
+                # Conexión SSL directa
+                server = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=30)
+                logger.info(f"🔒 Usando conexión SSL en puerto {self.smtp_port}")
+            else:
+                # Conexión normal con STARTTLS
+                server = smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=30)
+                server.starttls()
+                logger.info(f"🔒 Usando conexión TLS en puerto {self.smtp_port}")
+            
             server.login(self.smtp_user, self.smtp_password)
             server.send_message(msg)
             server.quit()
@@ -83,15 +95,24 @@ class EmailService:
             logger.error(f"❌ Error de autenticación SMTP: {str(e)}")
             logger.error("   Verifica tu usuario y contraseña de Gmail (debe ser una contraseña de aplicación)")
             return False
+        except smtplib.SMTPConnectError as e:
+            logger.error(f"❌ Error de conexión SMTP: {str(e)}")
+            logger.error(f"   No se pudo conectar a {self.smtp_host}:{self.smtp_port}")
+            return False
         except smtplib.SMTPException as e:
             logger.error(f"❌ Error SMTP: {str(e)}")
+            return False
+        except OSError as e:
+            logger.error(f"❌ Error de red: {str(e)}")
+            logger.error(f"   Network is unreachable - Render bloquea conexiones SMTP en plan gratuito")
+            logger.error(f"   Considera usar SendGrid o un servicio SMTP alternativo")
             return False
         except Exception as e:
             logger.error(f"❌ Error inesperado enviando email: {str(e)}")
             return False
     
     # ============================================
-    # ✅ NUEVO MÉTODO GENÉRICO PARA ENVIAR EMAILS
+    # ✅ MÉTODO GENÉRICO PARA ENVIAR EMAILS
     # ============================================
     
     async def send_email(self, to_email: str, subject: str, body: str, html_body: str = None) -> bool:
