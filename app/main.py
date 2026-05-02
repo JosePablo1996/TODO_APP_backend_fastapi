@@ -108,12 +108,18 @@ if "http://localhost:3000" not in cors_origins:
     cors_origins.append("http://localhost:3000")
     logger.info("✅ Agregado http://localhost:3000 a CORS origins")
 
+# Agregar URL de producción de Render si no está presente
+render_url = "https://todo-app-backend-fastapi-klh2.onrender.com"
+if render_url not in cors_origins and "*" not in cors_origins:
+    cors_origins.append(render_url)
+    logger.info(f"✅ Agregado {render_url} a CORS origins")
+
 # Configurar CORS con todas las opciones necesarias para WebAuthn
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
     allow_headers=[
         "Content-Type",
         "Authorization",
@@ -257,6 +263,7 @@ logger.info("   - webauthn: Passkeys / WebAuthn")
 # ============================================
 
 @app.get("/", tags=["root"])
+@app.head("/", tags=["root"])  # ✅ CORREGIDO: Aceptar HEAD para health checks de Render
 async def root():
     return {
         "message": f"Bienvenido a {settings.API_TITLE}",
@@ -279,6 +286,7 @@ async def root():
 
 
 @app.get("/api/health", tags=["health"])
+@app.head("/api/health", tags=["health"])  # ✅ CORREGIDO: Aceptar HEAD para health checks
 async def health_check():
     """Health check de la API"""
     import httpx
@@ -375,7 +383,14 @@ async def api_info():
                 "refresh": "/api/auth/refresh",
                 "logout": "/api/auth/logout",
                 "forgot_password": "/api/auth/forgot-password",
-                "reset_password": "/api/auth/reset-password"
+                "reset_password": "/api/auth/reset-password",
+                "otp_send": "/api/auth/otp/send",
+                "otp_verify": "/api/auth/otp/verify",
+                "2fa_setup": "/api/auth/2fa/setup",
+                "2fa_enable": "/api/auth/2fa/enable",
+                "2fa_verify": "/api/auth/2fa/verify",
+                "2fa_disable": "/api/auth/2fa/disable",
+                "2fa_status": "/api/auth/2fa/status"
             },
             "users": {
                 "profile": "/api/users/profile",

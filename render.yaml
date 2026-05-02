@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: todo-app-backend-fastapi
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        value: pabloquintanilla988@gmail.com
+      - key: SMTP_PASSWORD
+        value: fcdetysnmpzlbwvn
+      - key: SMTP_FROM
+        value: pabloquintanilla988@gmail.com
+      - key: SEND_PASSWORD_CHANGE_NOTIFICATIONS
+        value: "true"
+      - key: SEND_WELCOME_EMAILS
+        value: "true"
+      - key: SEND_SECURITY_ALERTS
+        value: "true"
