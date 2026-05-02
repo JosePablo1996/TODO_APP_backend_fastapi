@@ -1004,118 +1004,69 @@ async def verify_otp_code(request: OtpVerifyRequest):
     del otp_storage[request.email]
     
     # ============================================
-    # OBTENER USUARIO REAL DE LA BASE DE DATOS
+    # ✅ OBTENER USUARIO EXISTENTE DE SUPABASE (NO CREAR NUEVO)
     # ============================================
     user_id = None
     user_metadata = {}
     
     try:
-        # Buscar el usuario en la tabla profiles usando el email
         admin_client = supabase_auth.get_admin_client()
         
-        # Buscar en la tabla profiles (pública)
-        profile_response = admin_client.table("profiles").select("*").eq("email", request.email).execute()
+        # ✅ PASO 1: Buscar en auth.users (datos completos del usuario)
+        logger.info(f"🔍 Buscando usuario en auth.users: {request.email}")
+        try:
+            users_response = admin_client.auth.admin.list_users()
+            if users_response and hasattr(users_response, 'users') and users_response.users:
+                for user in users_response.users:
+                    if user.email == request.email:
+                        user_id = user.id
+                        user_metadata = user.user_metadata or {}
+                        logger.info(f"✅ Usuario encontrado en auth.users: {user_id}")
+                        logger.info(f"   Metadata: username={user_metadata.get('username')}, full_name={user_metadata.get('full_name')}, avatar={'Sí' if user_metadata.get('avatar') else 'No'}")
+                        break
+        except Exception as e:
+            logger.warning(f"⚠️ Error buscando en auth.users: {e}")
         
-        if profile_response and profile_response.data and len(profile_response.data) > 0:
-            profile = profile_response.data[0]
-            user_id = profile.get("id")
-            user_metadata = {
-                "username": profile.get("username"),
-                "full_name": profile.get("full_name"),
-                "avatar": profile.get("avatar"),
-                "banner": profile.get("banner"),
-                "bio": profile.get("bio")
-            }
-            logger.info(f"✅ Usuario encontrado en tabla profiles: {user_id}")
-        
-        # Si no se encontró en profiles, buscar en auth.users
+        # ✅ PASO 2: Si no se encontró en auth.users, buscar en profiles
         if not user_id:
+            logger.info(f"🔍 Buscando usuario en profiles: {request.email}")
             try:
-                users_response = admin_client.auth.admin.list_users()
-                if users_response and hasattr(users_response, 'users') and users_response.users:
-                    for user in users_response.users:
-                        if user.email == request.email:
-                            user_id = user.id
-                            user_metadata = user.user_metadata or {}
-                            logger.info(f"✅ Usuario encontrado en auth.users: {user_id}")
-                            break
-            except Exception as e:
-                logger.warning(f"⚠️ Error buscando en auth.users: {e}")
-        
-        # Si aún no se encontró, crear usuario nuevo
-        if not user_id:
-            logger.info(f"📝 Usuario no existe, creando nuevo: {request.email}")
-            
-            username = request.email.split('@')[0]
-            
-            try:
-                new_user = admin_client.auth.admin.create_user({
-                    "email": request.email,
-                    "email_confirm": True,
-                    "user_metadata": {
-                        "username": username,
-                        "full_name": username,
-                        "token_version": 1
+                profile_response = admin_client.table("profiles").select("*").eq("email", request.email).execute()
+                if profile_response and profile_response.data and len(profile_response.data) > 0:
+                    profile = profile_response.data[0]
+                    user_id = profile.get("id")
+                    user_metadata = {
+                        "username": profile.get("username"),
+                        "full_name": profile.get("full_name"),
+                        "avatar": profile.get("avatar"),
+                        "banner": profile.get("banner"),
+                        "bio": profile.get("bio")
                     }
-                })
-                
-                user_id = new_user.user.id
-                user_metadata = {"username": username, "full_name": username}
-                logger.info(f"✅ Usuario creado: {user_id}")
-                
-                # Crear perfil
-                try:
-                    profile_data = {
-                        "id": user_id,
-                        "email": request.email,
-                        "username": username,
-                        "full_name": username,
-                        "created_at": datetime.now().isoformat()
-                    }
-                    admin_client.table("profiles").insert(profile_data).execute()
-                    logger.info(f"✅ Perfil creado")
-                except Exception as e:
-                    logger.warning(f"⚠️ No se pudo crear perfil: {e}")
-                    
+                    logger.info(f"✅ Usuario encontrado en profiles: {user_id}")
             except Exception as e:
-                error_msg = str(e)
-                logger.error(f"❌ Error creando usuario: {error_msg}")
-                
-                if "already been registered" in error_msg.lower():
-                    # Último intento: consultar directamente la tabla auth.users con SQL
-                    try:
-                        sql_query = f"SELECT id, raw_user_meta_data FROM auth.users WHERE email = '{request.email}'"
-                        result = admin_client.rpc('exec_sql', {'query': sql_query})
-                        if result and result.data and len(result.data) > 0:
-                            user_id = result.data[0].get("id")
-                            user_metadata = result.data[0].get("raw_user_meta_data", {})
-                            logger.info(f"✅ Usuario recuperado vía SQL: {user_id}")
-                    except Exception as sql_error:
-                        logger.error(f"❌ Error SQL: {sql_error}")
-                
-                if not user_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="No se pudo iniciar sesión. Por favor, inicia sesión con tu email y contraseña."
-                    )
+                logger.warning(f"⚠️ Error buscando en profiles: {e}")
         
-        # ============================================
-        # VERIFICAR QUE TENEMOS USER_ID
-        # ============================================
+        # ✅ PASO 3: Si no existe, NO crear - devolver error claro
         if not user_id:
+            logger.warning(f"❌ Usuario {request.email} no encontrado en Supabase")
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No se pudo identificar al usuario. Por favor, inicia sesión con tu email y contraseña."
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No se encontró una cuenta con este email. Por favor, regístrate primero con email y contraseña en la página de registro."
             )
         
         # ============================================
-        # GENERAR TOKENS JWT
+        # GENERAR TOKENS JWT CON DATOS REALES DEL USUARIO
         # ============================================
         from app.services.jwt_service import create_access_token, create_refresh_token
         
         token_username = user_metadata.get("username") or request.email.split('@')[0]
         token_full_name = user_metadata.get("full_name") or token_username
-        token_avatar = user_metadata.get("avatar")  # ✅ OBTENER AVATAR
+        token_avatar = user_metadata.get("avatar")
+        
+        logger.info(f"📸 Generando token para {request.email}:")
+        logger.info(f"   username: {token_username}")
+        logger.info(f"   full_name: {token_full_name}")
+        logger.info(f"   avatar: {'Sí' if token_avatar else 'No'}")
         
         access_token = create_access_token(
             subject=user_id,
@@ -1124,7 +1075,7 @@ async def verify_otp_code(request: OtpVerifyRequest):
                 "email_verified": True,
                 "username": token_username,
                 "full_name": token_full_name,
-                "avatar": token_avatar,  # ✅ INCLUIR AVATAR
+                "avatar": token_avatar,
                 "user_metadata": user_metadata
             }
         )
@@ -1142,7 +1093,7 @@ async def verify_otp_code(request: OtpVerifyRequest):
                 "email": request.email,
                 "username": token_username,
                 "full_name": token_full_name,
-                "avatar": token_avatar,  # ✅ INCLUIR AVATAR
+                "avatar": token_avatar,
                 "email_verified": True
             }
         )
@@ -1155,7 +1106,6 @@ async def verify_otp_code(request: OtpVerifyRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al procesar la verificación: {str(e)}"
         )
-
 
 # ============================================
 # ENDPOINTS PARA 2FA (TOTP)
