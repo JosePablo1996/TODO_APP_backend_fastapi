@@ -32,34 +32,40 @@ class WebAuthnService:
     """Servicio para manejar WebAuthn/Passkeys"""
 
     def __init__(self):
-        # Obtener FRONTEND_URL de settings
-        frontend_url = settings.FRONTEND_URL
-        render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
-        is_render = bool(render_host)
+        # ✅ Verificar si estamos forzando entorno de desarrollo
+        force_dev = os.getenv("WEBAUTHN_FORCE_DEV", "").lower() in ("true", "1", "yes")
         
-        # Configuración según entorno
-        if frontend_url and "localhost" in frontend_url:
+        if force_dev:
+            # MODO DESARROLLO FORZADO - Para frontend en localhost
             self.rp_id = "localhost"
-            self.origin = frontend_url
-            logger.info(f"🏠 [WEBAUTHN] Entorno LOCAL detectado")
-        elif is_render:
-            self.rp_id = render_host
-            self.origin = f"https://{render_host}"
-            logger.info(f"🔄 [WEBAUTHN] Entorno RENDER detectado")
-        elif frontend_url:
-            # Para producción con dominio personalizado
-            self.rp_id = frontend_url.replace("https://", "").replace("http://", "").split(":")[0]
-            self.origin = frontend_url
-            logger.info(f"🌐 [WEBAUTHN] Entorno PRODUCCIÓN detectado")
+            self.origin = os.getenv("WEBAUTHN_ORIGIN", "http://localhost:5173")
+            logger.info(f"🏠 [WEBAUTHN] MODO DESARROLLO FORZADO (WEBAUTHN_FORCE_DEV=true)")
         else:
-            self.rp_id = "localhost"
-            self.origin = "http://localhost:5173"
-            logger.info(f"🏠 [WEBAUTHN] Usando configuración por defecto (localhost)")
+            # Comportamiento normal según entorno
+            frontend_url = settings.FRONTEND_URL
+            render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
+            is_render = bool(render_host)
+            
+            if frontend_url and "localhost" in frontend_url:
+                self.rp_id = "localhost"
+                self.origin = frontend_url
+                logger.info(f"🏠 [WEBAUTHN] Entorno LOCAL detectado por FRONTEND_URL")
+            elif is_render:
+                self.rp_id = render_host
+                self.origin = f"https://{render_host}"
+                logger.info(f"🔄 [WEBAUTHN] Entorno RENDER detectado")
+            elif frontend_url:
+                self.rp_id = frontend_url.replace("https://", "").replace("http://", "").split(":")[0]
+                self.origin = frontend_url
+                logger.info(f"🌐 [WEBAUTHN] Entorno PRODUCCIÓN detectado")
+            else:
+                self.rp_id = "localhost"
+                self.origin = "http://localhost:5173"
+                logger.info(f"🏠 [WEBAUTHN] Usando configuración por defecto (localhost)")
         
         self.rp_name = settings.API_TITLE
 
-        # ✅ CORREGIDO: Solo orígenes válidos para el entorno actual
-        # En desarrollo local, SOLO aceptamos localhost
+        # ✅ Orígenes permitidos según RP ID
         if self.rp_id == "localhost":
             self.allowed_origins = [
                 "http://localhost:5173",  # Vite dev server
@@ -67,10 +73,7 @@ class WebAuthnService:
                 "http://localhost:3000",  # Alternativa común
             ]
         else:
-            # En producción, solo el dominio de producción
-            self.allowed_origins = [
-                self.origin,
-            ]
+            self.allowed_origins = [self.origin]
         
         # Eliminar duplicados manteniendo el orden
         self.allowed_origins = list(dict.fromkeys(self.allowed_origins))
@@ -83,7 +86,6 @@ class WebAuthnService:
         logger.info(f"   RP Name: {self.rp_name}")
         logger.info(f"   Origin principal: {self.origin}")
         logger.info(f"   Orígenes permitidos: {self.allowed_origins}")
-        logger.info(f"   Entorno: {'Render' if is_render else 'Local'}")
         logger.info(f"   ⚠️ IMPORTANTE: Para cambiar entre entornos, elimina las passkeys existentes")
 
     def _encode_credential_id(self, credential_id: bytes) -> str:
@@ -194,7 +196,7 @@ class WebAuthnService:
     ) -> bool:
         """Guarda una nueva credencial WebAuthn"""
         logger.info(f"💾 Guardando credencial para usuario: {user_id}")
-        logger.debug(f"   RP ID usado: {self.rp_id}")  # ✅ Log para debugging
+        logger.debug(f"   RP ID usado: {self.rp_id}")
         logger.debug(f"   Credential ID: {credential_id[:20]}...")
         logger.debug(f"   Sign count: {sign_count}")
         logger.debug(f"   Device name: {device_name}")
@@ -217,7 +219,7 @@ class WebAuthnService:
                 "sign_count": sign_count,
                 "device_name": device_name,
                 "device_type": device_type,
-                "rp_id": self.rp_id,  # ✅ Guardar el RP ID usado
+                "rp_id": self.rp_id,  # Guardar el RP ID usado
                 "created_at": now,
                 "updated_at": now
             }
@@ -299,7 +301,8 @@ class WebAuthnService:
     ) -> Dict[str, Any]:
         """Genera opciones para registrar una nueva passkey"""
         logger.info(f"🔑 Generando opciones de registro para usuario: {user_id}")
-        logger.info(f"   Usando RP ID: {self.rp_id}")  # ✅ Log importante
+        logger.info(f"   Usando RP ID: {self.rp_id}")
+        logger.info(f"   Origin esperado: {self.origin}")
 
         self._cleanup_expired_challenges()
 
@@ -323,7 +326,7 @@ class WebAuthnService:
             self.registration_challenges[user_id] = {
                 "challenge": challenge_b64,
                 "challenge_bytes": registration_options.challenge,
-                "rp_id": self.rp_id,  # ✅ Guardar RP ID usado
+                "rp_id": self.rp_id,
                 "created_at": datetime.now().isoformat()
             }
             
@@ -348,7 +351,7 @@ class WebAuthnService:
             raise
 
     # ============================================
-    # VERIFICAR REGISTRO (SIMPLIFICADO)
+    # VERIFICAR REGISTRO
     # ============================================
 
     async def verify_registration(
@@ -369,7 +372,7 @@ class WebAuthnService:
         
         stored_challenge_string = stored_data["challenge"]
         stored_challenge_bytes = stored_data["challenge_bytes"]
-        stored_rp_id = stored_data.get("rp_id", self.rp_id)  # ✅ Usar RP ID del registro
+        stored_rp_id = stored_data.get("rp_id", self.rp_id)
         
         logger.info(f"   🌐 Verificando con RP ID: {stored_rp_id}")
         logger.info(f"   🌐 Origin esperado: {self.origin}")
@@ -391,12 +394,11 @@ class WebAuthnService:
                 }
             }
             
-            # ✅ Verificar SOLO con el origin correcto para este entorno
             verification = verify_registration_response(
                 credential=credential_dict,
                 expected_challenge=stored_challenge_bytes,
-                expected_rp_id=stored_rp_id,  # ✅ Usar el RP ID guardado
-                expected_origin=self.origin,  # ✅ Usar el origin principal
+                expected_rp_id=stored_rp_id,
+                expected_origin=self.origin,
                 require_user_verification=True,
             )
             
@@ -405,19 +407,18 @@ class WebAuthnService:
             public_key = verification.credential_public_key
             sign_count = verification.sign_count
             
-            # Limpiar challenge usado
             del self.registration_challenges[user_id]
             
             return True, {
                 "credential_id": credential_id,
                 "public_key": public_key,
                 "sign_count": sign_count,
-                "rp_id": stored_rp_id  # ✅ Devolver RP ID usado
+                "rp_id": stored_rp_id
             }, None
             
         except Exception as e:
             logger.error(f"❌ Error verificando registro: {str(e)}", exc_info=True)
-            return False, None, f"Verificación fallida: {str(e)}"
+            return False, None, str(e)
 
     # ============================================
     # GENERAR OPCIONES DE AUTENTICACIÓN
@@ -430,7 +431,7 @@ class WebAuthnService:
     ) -> Dict[str, Any]:
         """Genera opciones para autenticación con passkey"""
         logger.info(f"🔑 Generando opciones de autenticación")
-        logger.info(f"   Usando RP ID: {self.rp_id}")  # ✅ Log importante
+        logger.info(f"   Usando RP ID: {self.rp_id}")
 
         self._cleanup_expired_challenges()
 
@@ -455,7 +456,7 @@ class WebAuthnService:
                 "challenge": challenge_b64,
                 "challenge_bytes": auth_options.challenge,
                 "user_id": user_id,
-                "rp_id": self.rp_id,  # ✅ Guardar RP ID usado
+                "rp_id": self.rp_id,
                 "created_at": datetime.now().isoformat()
             }
 
@@ -473,7 +474,7 @@ class WebAuthnService:
             raise
 
     # ============================================
-    # VERIFICAR AUTENTICACIÓN (SIMPLIFICADO)
+    # VERIFICAR AUTENTICACIÓN
     # ============================================
 
     async def verify_authentication(
@@ -488,7 +489,8 @@ class WebAuthnService:
     ) -> Tuple[bool, Optional[int], Optional[str]]:
         """Verifica la respuesta de autenticación con passkey"""
         logger.info(f"🔐 Verificando autenticación")
-        logger.info(f"   Origin esperado: {self.origin}")  # ✅ Log claro
+        logger.info(f"   RP ID: {self.rp_id}")
+        logger.info(f"   Origin esperado: {self.origin}")
 
         session_id = user_id or "anonymous"
         stored_data = self.authentication_challenges.get(session_id)
@@ -499,7 +501,7 @@ class WebAuthnService:
         
         stored_challenge_string = stored_data["challenge"]
         stored_challenge_bytes = stored_data["challenge_bytes"]
-        stored_rp_id = stored_data.get("rp_id", self.rp_id)  # ✅ Usar RP ID guardado
+        stored_rp_id = stored_data.get("rp_id", self.rp_id)
         
         if challenge != stored_challenge_string:
             logger.error(f"❌ Challenge no coincide")
@@ -521,12 +523,11 @@ class WebAuthnService:
         }
         
         try:
-            # ✅ Verificar con el RP ID y origin correctos para este entorno
             verification = verify_authentication_response(
                 credential=credential_dict,
                 expected_challenge=stored_challenge_bytes,
-                expected_rp_id=stored_rp_id,  # ✅ Usar RP ID consistente
-                expected_origin=self.origin,  # ✅ Usar origin principal
+                expected_rp_id=stored_rp_id,
+                expected_origin=self.origin,
                 credential_public_key=public_key_bytes,
                 credential_current_sign_count=stored_credential["sign_count"],
                 require_user_verification=True,
@@ -534,7 +535,6 @@ class WebAuthnService:
 
             logger.info(f"✅ Autenticación verificada exitosamente")
             
-            # Limpiar challenge usado
             if session_id in self.authentication_challenges:
                 del self.authentication_challenges[session_id]
             
@@ -544,7 +544,6 @@ class WebAuthnService:
             error_msg = str(e)
             logger.error(f"❌ Autenticación fallida: {error_msg}")
             
-            # ✅ Mensaje más útil para debugging
             if "origin" in error_msg.lower():
                 logger.error(f"   💡 El origin esperado es: {self.origin}")
                 logger.error(f"   💡 Asegúrate de que el frontend esté sirviendo desde este origen")
