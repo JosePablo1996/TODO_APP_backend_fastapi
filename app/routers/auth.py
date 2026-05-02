@@ -1448,7 +1448,6 @@ async def disable_2fa(
             detail="Error al desactivar 2FA"
         )
 
-
 @router.get("/2fa/status", response_model=TwoFactorStatusResponse)
 async def get_2fa_status(
     current_user: dict = Depends(get_current_user)
@@ -1463,25 +1462,45 @@ async def get_2fa_status(
     admin_client = supabase_auth.get_admin_client()
     
     try:
-        # Intentar obtener de tabla user_two_factor
+        # ✅ PASO 1: Intentar obtener de tabla user_two_factor
+        logger.info(f"🔍 Buscando en tabla user_two_factor para user_id: {user_id}")
         result = admin_client.table("user_two_factor").select("*").eq("user_id", user_id).execute()
+        
         if result.data and len(result.data) > 0:
+            two_factor_data = result.data[0]
+            enabled = two_factor_data.get("enabled", False)
+            has_codes = bool(two_factor_data.get("recovery_codes"))
+            logger.info(f"✅ Encontrado en user_two_factor: enabled={enabled}, has_recovery_codes={has_codes}")
             return TwoFactorStatusResponse(
-                enabled=result.data[0].get("enabled", False),
-                has_recovery_codes=bool(result.data[0].get("recovery_codes"))
+                enabled=enabled,
+                has_recovery_codes=has_codes
             )
         else:
-            # Fallback: obtener de user_metadata
+            logger.info(f"🔍 No encontrado en tabla, buscando en user_metadata...")
+            # ✅ PASO 2: Fallback - obtener de user_metadata
             user_data = await supabase_auth.get_user_by_id(user_id)
-            user_metadata = user_data.get("user_metadata", {})
-            return TwoFactorStatusResponse(
-                enabled=user_metadata.get("two_factor_enabled", False),
-                has_recovery_codes=bool(user_metadata.get("two_factor_recovery_hashes"))
-            )
+            logger.info(f"🔍 Datos de usuario obtenidos: {user_data}")
+            
+            if user_data:
+                user_metadata = user_data.get("user_metadata", {})
+                logger.info(f"🔍 user_metadata: {user_metadata}")
+                
+                enabled = user_metadata.get("two_factor_enabled", False)
+                has_codes = bool(user_metadata.get("two_factor_recovery_hashes"))
+                
+                logger.info(f"✅ Estado desde metadata: enabled={enabled}, has_recovery_codes={has_codes}")
+                return TwoFactorStatusResponse(
+                    enabled=enabled,
+                    has_recovery_codes=has_codes
+                )
+            else:
+                logger.warning(f"⚠️ No se encontró usuario con ID: {user_id}")
+                return TwoFactorStatusResponse(enabled=False, has_recovery_codes=False)
+                
     except Exception as e:
-        logger.error(f"Error obteniendo estado 2FA: {e}")
+        logger.error(f"❌ Error obteniendo estado 2FA: {e}", exc_info=True)
         return TwoFactorStatusResponse(enabled=False, has_recovery_codes=False)
-
+        
 # ============================================
 # ENDPOINTS DE DIAGNÓSTICO
 # ============================================
