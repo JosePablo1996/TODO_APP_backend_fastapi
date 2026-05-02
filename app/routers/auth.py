@@ -54,6 +54,8 @@ from app.models import (
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 logger = logging.getLogger(__name__)
 
+# ✅ AGREGAR ESTA LÍNEA - Variable para detectar reinicio del servidor
+LAST_RESTART = datetime.now()
 
 # ============================================
 # ALMACENAMIENTO TEMPORAL OTP
