@@ -827,7 +827,6 @@ async def change_password(
             detail=f"Error al cambiar contraseña: {str(e)}"
         )
 
-
 # ============================================
 # ✅ ENDPOINT OTP CORREGIDO - VERSIÓN FINAL
 # ============================================
@@ -842,6 +841,12 @@ async def send_otp_code(request: OtpSendRequest):
     # Limpiar datos expirados
     clean_expired_otps()
     clean_rate_limit()
+    
+    # ✅ NUEVO: Resetear rate limiting si el servidor se acaba de iniciar (menos de 2 minutos)
+    time_since_restart = (datetime.now() - LAST_RESTART).total_seconds()
+    if time_since_restart < 120:
+        logger.info(f"🔄 Servidor recién iniciado (hace {time_since_restart:.0f}s), limpiando rate limits")
+        otp_rate_limit.clear()
     
     # Limpiar cualquier código existente para este email
     if request.email in otp_storage:
@@ -947,25 +952,7 @@ async def send_otp_code(request: OtpSendRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al procesar la solicitud: {str(e)}"
         )
-    
-    # ✅ Solo guardar el código si el email se envió exitosamente
-    otp_storage[request.email] = {
-        "code": code,
-        "expires_at": datetime.now() + timedelta(minutes=15),
-        "attempts": 0
-    }
-    
-    # Registrar rate limit
-    otp_rate_limit[request.email].append(datetime.now())
-    
-    logger.info(f"✅ Código OTP generado y enviado a {request.email} (expira en 15 min)")
-    
-    return OtpSendResponse(
-        message="Código enviado exitosamente. Revisa tu correo electrónico.",
-        expires_in=900
-    )
-
-
+        
 @router.post("/otp/verify", response_model=OtpVerifyResponse)
 async def verify_otp_code(request: OtpVerifyRequest):
     """
