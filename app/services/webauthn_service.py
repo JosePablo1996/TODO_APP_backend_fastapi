@@ -57,14 +57,15 @@ class WebAuthnService:
         
         self.rp_name = settings.API_TITLE
 
-        # ✅ Lista de orígenes permitidos (web + móvil)
+        # ✅ CORREGIDO: Orígenes permitidos en orden correcto (localhost PRIMERO)
         self.allowed_origins = [
-            self.origin,
             "http://localhost:5173",
             "http://localhost:8000",
+            self.origin,
             "https://todo-app-backend-fastapi-klh2.onrender.com",
             "android:apk-key-hash:com.todoappmanager.flutter",
         ]
+        # Eliminar duplicados manteniendo el orden
         self.allowed_origins = list(dict.fromkeys(self.allowed_origins))
 
         self.registration_challenges: Dict[str, Dict[str, Any]] = {}
@@ -377,7 +378,6 @@ class WebAuthnService:
             try:
                 decoded_text = attestation_object_bytes.decode('utf-8')
                 if decoded_text.startswith('{'):
-                    # Es JSON de Flutter
                     logger.info("   📱 Detectado formato JSON (Flutter)")
                     return await self._verify_registration_json(
                         user_id=user_id,
@@ -418,8 +418,6 @@ class WebAuthnService:
             
             logger.debug(f"   authData (Base64URL): {auth_data_b64[:30]}...")
             
-            # El authData ya viene en Base64URL, lo usamos directamente
-            # Reconstruir el credential dict para verify_registration_response
             credential_dict = {
                 "id": credential_id,
                 "rawId": credential_id,
