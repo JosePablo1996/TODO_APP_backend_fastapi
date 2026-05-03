@@ -78,7 +78,7 @@ class SupabaseStorageService:
         filename: str,
         content_type: str
     ) -> Optional[str]:
-        """Sube un archivo a Supabase Storage usando el token del usuario"""
+        """Sube un archivo a Supabase Storage usando la service key"""
         if not self.is_configured:
             logger.error("❌ Supabase no está configurado")
             return None
@@ -94,8 +94,10 @@ class SupabaseStorageService:
             unique_name = f"{user_id}/{timestamp}-{uuid.uuid4()}.{file_ext}"
             upload_url = f"{self.storage_url}/object/{bucket}/{unique_name}"
             
+            # ✅ CORREGIDO: Usar service key en lugar de user token
+            # El user token causaba "signature verification failed"
             headers = {
-                "Authorization": f"Bearer {user_token}",
+                "Authorization": f"Bearer {self.key}",
                 "apikey": self.key,
                 "Content-Type": content_type
             }
