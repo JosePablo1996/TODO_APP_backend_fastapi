@@ -665,7 +665,6 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
             message="Si el email existe en nuestro sistema, recibirás instrucciones para restablecer tu contraseña."
         )
 
-
 # ============================================
 # ✅ NUEVO: RESET DE CONTRASEÑA POR CÓDIGO OTP
 # ============================================
@@ -688,42 +687,47 @@ async def forgot_password_otp(request: ForgotPasswordRequest):
             detail="Servicio de autenticación no disponible"
         )
     
-    # ✅ CORREGIDO: Buscar usuario por email (usa get_user_by_email)
+    # ✅ CORREGIDO: Buscar usuario con list_users (comparación case-insensitive)
     user_exists = False
     user_name = request.email.split('@')[0]
+    target_email = request.email.lower().strip()
     
     try:
         admin_client = supabase_auth.get_admin_client()
         
-        # Método 1: Buscar por email directamente (más confiable)
-        try:
-            user_response = admin_client.auth.admin.get_user_by_email(request.email)
-            if user_response and hasattr(user_response, 'user') and user_response.user:
+        # Listar todos los usuarios y buscar manualmente
+        users_response = admin_client.auth.admin.list_users()
+        
+        users_list = []
+        if users_response is not None:
+            if hasattr(users_response, 'users') and users_response.users:
+                users_list = users_response.users
+            elif isinstance(users_response, list):
+                users_list = users_response
+        
+        logger.info(f"📋 Buscando entre {len(users_list)} usuarios: {target_email}")
+        
+        for user in users_list:
+            user_email = getattr(user, 'email', '')
+            if user_email.lower().strip() == target_email:
                 user_exists = True
-                user_metadata = user_response.user.user_metadata or {}
-                user_name = user_metadata.get("full_name") or user_metadata.get("username") or request.email.split('@')[0]
-                logger.info(f"✅ Usuario encontrado por email: {request.email}")
-        except Exception as e:
-            logger.warning(f"⚠️ get_user_by_email falló: {e}")
-            # Método 2: Fallback - listar todos los usuarios
-            try:
-                users_response = admin_client.auth.admin.list_users()
-                if users_response and hasattr(users_response, 'users') and users_response.users:
-                    for user in users_response.users:
-                        if user.email == request.email:
-                            user_exists = True
-                            user_metadata = user.user_metadata or {}
-                            user_name = user_metadata.get("full_name") or user_metadata.get("username") or request.email.split('@')[0]
-                            logger.info(f"✅ Usuario encontrado en lista: {request.email}")
-                            break
-            except Exception as e2:
-                logger.error(f"❌ Error listando usuarios: {e2}")
+                user_metadata = getattr(user, 'user_metadata', {}) or {}
+                user_name = user_metadata.get("full_name") or user_metadata.get("username") or target_email.split('@')[0]
+                logger.info(f"✅ Usuario encontrado: {target_email}")
+                break
+        
+        if not user_exists:
+            logger.warning(f"❌ Usuario NO encontrado entre {len(users_list)} usuarios: {target_email}")
+            # Log para debug: mostrar los emails disponibles
+            for u in users_list:
+                logger.debug(f"   Disponible: {getattr(u, 'email', 'N/A')}")
     
     except Exception as e:
-        logger.error(f"❌ Error verificando email: {e}")
+        logger.error(f"❌ Error buscando usuario: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     
     if not user_exists:
-        logger.info(f"📧 Email no encontrado: {request.email}")
         # Por seguridad, no revelar si el email existe o no
         return ForgotPasswordResponse(
             message="Si el email existe en nuestro sistema, recibirás un código de verificación."
@@ -800,6 +804,97 @@ async def forgot_password_otp(request: ForgotPasswordRequest):
     )
 
 
+@router.post("/reset-password-otp", response_model=ResetPasswordResponse)
+async def reset_password_otp(request: ResetPasswordOtpVerifyRequest):
+    """
+    ✅ NUEVO: Verifica código OTP y cambia la contraseña.
+    """
+    logger.info(f"🔐 Verificando código OTP para reset: {request.email}")
+    
+    # Verificar código
+    stored = reset_otp_storage.get(request.email)
+    
+    if not stored:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se encontró una solicitud de código. Solicita uno nuevo."
+        )
+    
+    if datetime.now() > stored["expires_at"]:
+        del reset_otp_storage[request.email]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El código ha expirado. Solicita uno nuevo."
+        )
+    
+    if stored["attempts"] >= 5:
+        del reset_otp_storage[request.email]
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Demasiados intentos. Solicita un nuevo código."
+        )
+    
+    if stored["code"] != request.code:
+        stored["attempts"] += 1
+        remaining = 5 - stored["attempts"]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Código incorrecto. Te quedan {remaining} intentos."
+        )
+    
+    # Código correcto - limpiar
+    del reset_otp_storage[request.email]
+    
+    # ✅ CORREGIDO: Buscar usuario con list_users
+    try:
+        admin_client = supabase_auth.get_admin_client()
+        user_id = None
+        target_email = request.email.lower().strip()
+        
+        # Listar usuarios y buscar manualmente
+        users_response = admin_client.auth.admin.list_users()
+        
+        users_list = []
+        if users_response is not None:
+            if hasattr(users_response, 'users') and users_response.users:
+                users_list = users_response.users
+            elif isinstance(users_response, list):
+                users_list = users_response
+        
+        for user in users_list:
+            user_email = getattr(user, 'email', '')
+            if user_email.lower().strip() == target_email:
+                user_id = getattr(user, 'id', None)
+                logger.info(f"✅ Usuario encontrado: {target_email} (ID: {user_id})")
+                break
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Usuario no encontrado."
+            )
+        
+        # Actualizar contraseña
+        admin_client.auth.admin.update_user_by_id(
+            user_id,
+            {"password": request.new_password}
+        )
+        
+        logger.info(f"✅ Contraseña actualizada para usuario: {user_id}")
+        
+        return ResetPasswordResponse(
+            message="Contraseña actualizada exitosamente."
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error cambiando contraseña: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al cambiar contraseña: {str(e)}"
+        )
+        
 @router.post("/reset-password-otp", response_model=ResetPasswordResponse)
 async def reset_password_otp(request: ResetPasswordOtpVerifyRequest):
     """
