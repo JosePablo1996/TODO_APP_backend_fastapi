@@ -12,13 +12,23 @@ from datetime import datetime
 # ============================================
 
 class ForgotPasswordRequest(BaseModel):
-    """Solicitud de olvido de contraseña"""
+    """
+    Solicitud de olvido de contraseña.
+    ✅ Soporta detección de plataforma: web o mobile
+    """
     email: EmailStr = Field(..., description="Email del usuario", example="usuario@ejemplo.com")
+    platform: Optional[str] = Field(
+        'web', 
+        description="Plataforma desde la que se solicita: 'web' o 'mobile'",
+        example="mobile",
+        pattern="^(web|mobile)$"
+    )
     
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "email": "usuario@ejemplo.com"
+                "email": "usuario@ejemplo.com",
+                "platform": "web"
             }
         }
     )

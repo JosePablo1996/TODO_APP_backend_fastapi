@@ -1,5 +1,5 @@
 # app/routers/auth.py
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, Dict, Any, List
 from app.services.supabase_auth_service import supabase_auth
@@ -58,6 +58,16 @@ logger = logging.getLogger(__name__)
 LAST_RESTART = datetime.now()
 
 # ============================================
+# CONSTANTES PARA DEEP LINKS
+# ============================================
+
+# URL base para la app web (React)
+WEB_RESET_PASSWORD_URL = f"{settings.FRONTEND_URL}/reset-password"
+
+# Deep link para la app móvil (Flutter)
+MOBILE_RESET_PASSWORD_URL = "todoappmanager://reset-password"
+
+# ============================================
 # ALMACENAMIENTO TEMPORAL OTP
 # ============================================
 
@@ -88,6 +98,54 @@ def clean_rate_limit():
         otp_rate_limit[email] = [ts for ts in otp_rate_limit[email] if now - ts < timedelta(hours=1)]
         if not otp_rate_limit[email]:
             del otp_rate_limit[email]
+
+
+def detect_platform(request: Request) -> str:
+    """
+    Detecta si la solicitud viene de la app móvil o web.
+    
+    Prioridad:
+    1. Header 'X-Platform' (enviado por la app Flutter)
+    2. User-Agent (detección automática)
+    3. Por defecto: 'web'
+    
+    Returns:
+        'mobile' o 'web'
+    """
+    # ✅ Método 1: Header personalizado (más confiable)
+    platform_header = request.headers.get('X-Platform', '').lower()
+    if platform_header == 'mobile':
+        logger.info("📱 Plataforma detectada por header: mobile")
+        return 'mobile'
+    if platform_header == 'web':
+        logger.info("🌐 Plataforma detectada por header: web")
+        return 'web'
+    
+    # ✅ Método 2: Detección por User-Agent
+    user_agent = request.headers.get('User-Agent', '').lower()
+    
+    # Patrones de apps móviles
+    mobile_patterns = [
+        'flutter', 'dart', 'android', 'iphone', 'ipad', 'ios',
+        'mobile', 'okhttp', 'dio', 'cfnetwork', 'darwin'
+    ]
+    
+    for pattern in mobile_patterns:
+        if pattern in user_agent:
+            logger.info(f"📱 Plataforma detectada por User-Agent: mobile (pattern: {pattern})")
+            return 'mobile'
+    
+    # Patrones de navegadores web
+    web_patterns = ['mozilla', 'chrome', 'safari', 'firefox', 'edge', 'opera']
+    
+    for pattern in web_patterns:
+        if pattern in user_agent:
+            logger.info(f"🌐 Plataforma detectada por User-Agent: web (pattern: {pattern})")
+            return 'web'
+    
+    # ✅ Por defecto: web
+    logger.info(f"🌐 Plataforma no detectada, usando default: web (UA: {user_agent[:100]})")
+    return 'web'
 
 
 async def send_otp_email(to_email: str, code: str) -> bool:
@@ -548,10 +606,23 @@ async def logout(request: RefreshTokenRequest):
         )
 
 
+# ============================================
+# ✅ ENDPOINT FORGOT-PASSWORD ACTUALIZADO
+# SOPORTA WEB (REACT) Y MÓVIL (FLUTTER)
+# ============================================
+
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
-async def forgot_password(request: ForgotPasswordRequest):
-    """Solicita recuperación de contraseña"""
-    logger.info(f"📧 Solicitud de recuperación para: {request.email}")
+async def forgot_password(request: Request, body: ForgotPasswordRequest):
+    """
+    Solicita recuperación de contraseña.
+    
+    ✅ Soporta detección automática de plataforma:
+    - Web (React): usa URL normal (FRONTEND_URL/reset-password)
+    - Móvil (Flutter): usa deep link (todoappmanager://reset-password)
+    
+    También acepta header 'X-Platform' para forzar plataforma específica.
+    """
+    logger.info(f"📧 Solicitud de recuperación para: {body.email}")
     
     if not supabase_auth.is_available():
         raise HTTPException(
@@ -568,16 +639,26 @@ async def forgot_password(request: ForgotPasswordRequest):
                 detail="Cliente de autenticación no disponible"
             )
         
-        redirect_url = f"{settings.FRONTEND_URL}/reset-password"
+        # ✅ DETECTAR PLATAFORMA (web vs mobile)
+        platform = detect_platform(request)
         
+        # ✅ SELECCIONAR URL DE REDIRECCIÓN SEGÚN PLATAFORMA
+        if platform == 'mobile':
+            redirect_url = MOBILE_RESET_PASSWORD_URL
+            logger.info(f"📱 Usando deep link para app móvil: {redirect_url}")
+        else:
+            redirect_url = WEB_RESET_PASSWORD_URL
+            logger.info(f"🌐 Usando URL para web: {redirect_url}")
+        
+        # ✅ Enviar email de recuperación con redirect_to correcto
         client.auth.reset_password_for_email(
-            request.email,
+            body.email,
             options={
                 "redirect_to": redirect_url
             }
         )
         
-        logger.info(f"✅ Email de recuperación enviado a: {request.email}")
+        logger.info(f"✅ Email de recuperación enviado a: {body.email} (plataforma: {platform})")
         
         return ForgotPasswordResponse(
             message="Si el email existe en nuestro sistema, recibirás instrucciones para restablecer tu contraseña."
@@ -587,10 +668,15 @@ async def forgot_password(request: ForgotPasswordRequest):
         error_msg = str(e)
         logger.error(f"❌ Error en forgot-password: {error_msg}")
         
+        # Por seguridad, siempre devolver el mismo mensaje
         return ForgotPasswordResponse(
             message="Si el email existe en nuestro sistema, recibirás instrucciones para restablecer tu contraseña."
         )
 
+
+# ============================================
+# ENDPOINT RESET-PASSWORD (SIN CAMBIOS)
+# ============================================
 
 @router.post("/reset-password", response_model=ResetPasswordResponse)
 async def reset_password(request: ResetPasswordRequest):
