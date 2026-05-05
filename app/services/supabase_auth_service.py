@@ -7,6 +7,7 @@ import logging
 from typing import Optional, Dict, Any
 from datetime import datetime
 import jwt
+import httpx
 from fastapi import HTTPException, status
 from supabase import create_client, Client
 
@@ -29,20 +30,12 @@ class SupabaseAuthService:
 
         if self.is_configured:
             try:
-                # Cliente con service role key (operaciones administrativas)
                 self._client = create_client(self.url, self.service_key)
-                
-                # Cliente con anon key (operaciones de usuario)
                 if self.anon_key:
                     self._anon_client = create_client(self.url, self.anon_key)
-                    
                 logger.info("✅ SupabaseAuthService inicializado correctamente")
                 logger.info(f"   URL: {self.url}")
-                logger.info(f"   Service Key: {self.service_key[:20]}...")
-                
-                # Verificar conexión con la tabla user_passkeys (no crítico)
                 self._check_webauthn_table()
-                
             except Exception as e:
                 logger.error(f"❌ Error inicializando SupabaseAuthService: {str(e)}", exc_info=True)
                 self._client = None
@@ -52,16 +45,13 @@ class SupabaseAuthService:
 
     @property
     def client(self) -> Optional[Client]:
-        """Retorna el cliente admin (service role)"""
         return self._client
 
     @property
     def anon_client(self) -> Optional[Client]:
-        """Retorna el cliente anónimo para operaciones de usuario"""
         return self._anon_client
 
     def _check_webauthn_table(self):
-        """Verifica que la tabla user_passkeys exista (no crítico)"""
         try:
             if self._client:
                 logger.info("🔍 Verificando tabla public.user_passkeys...")
@@ -71,38 +61,27 @@ class SupabaseAuthService:
         except Exception as e:
             error_msg = str(e)
             if "PGRST205" in error_msg:
-                logger.debug("ℹ️ Tabla public.user_passkeys no encontrada (se creará cuando se use)")
+                logger.debug("ℹ️ Tabla public.user_passkeys no encontrada")
             else:
                 logger.warning(f"⚠️ Error verificando tabla user_passkeys: {error_msg[:100]}")
             return False
 
     def get_admin_client(self) -> Client:
-        """Obtiene el cliente con service role key (para operaciones admin)"""
         if not self._client:
             raise Exception("Supabase Auth no está configurado")
         return self._client
 
     def get_authenticated_client(self, access_token: str) -> Client:
-        """
-        Crea un cliente autenticado con el token del usuario
-        Útil para operaciones que requieren el contexto del usuario
-        """
         if not self.url or not self.anon_key:
             raise Exception("Supabase no está configurado")
-        
-        client = create_client(
+        return create_client(
             self.url,
             self.anon_key,
-            options={
-                "headers": {
-                    "Authorization": f"Bearer {access_token}"
-                }
-            }
+            options={"headers": {"Authorization": f"Bearer {access_token}"}}
         )
-        return client
 
     # ============================================
-    # MÉTODO CREATE_USER (CORREGIDO - USA SIGN_UP PÚBLICO)
+    # MÉTODO CREATE_USER (API REST DIRECTA)
     # ============================================
     
     async def create_user(
@@ -114,9 +93,7 @@ class SupabaseAuthService:
         user_metadata: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Crea un nuevo usuario en Supabase Auth.
-        ✅ Usa el endpoint público de registro (sign_up) en lugar del admin.
-        El perfil en public.profiles se crea automáticamente por el trigger on_auth_user_created.
+        Crea un nuevo usuario en Supabase Auth usando la API REST directamente.
         """
         logger.info(f"📝 Creando usuario en Supabase: {email}")
         
@@ -125,11 +102,6 @@ class SupabaseAuthService:
             raise Exception("Supabase no está configurado")
         
         try:
-            # ✅ USAR CLIENTE ANÓNIMO (ENDPOINT PÚBLICO)
-            if not self._anon_client:
-                self._anon_client = create_client(self.url, self.anon_key)
-            
-            # Preparar metadatos del usuario
             metadata = user_metadata or {}
             if username:
                 metadata["username"] = username
@@ -137,59 +109,82 @@ class SupabaseAuthService:
                 metadata["full_name"] = full_name
             metadata["token_version"] = 1
             
-            logger.debug(f"   Registrando usuario: email={email}, username={username}")
-            
-            # ✅ Registrar usando sign_up (endpoint público) con auto-confirmación
-            response = self._anon_client.auth.sign_up({
-                "email": email,
-                "password": password,
-                "options": {
-                    "data": metadata,
-                    "email_confirm": True  # Auto-confirmar email
+            # ✅ Usar la API REST de Supabase directamente (bypassea el SDK)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.url}/auth/v1/admin/users",
+                    headers={
+                        "apikey": self.service_key,
+                        "Authorization": f"Bearer {self.service_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "email": email,
+                        "password": password,
+                        "email_confirm": True,
+                        "user_metadata": metadata
+                    }
+                )
+                
+                if response.status_code >= 400:
+                    error_detail = response.json() if response.text else {}
+                    logger.error(f"❌ Error Supabase: {response.status_code} - {error_detail}")
+                    
+                    if response.status_code == 422:
+                        raise Exception("El usuario ya existe")
+                    raise Exception(f"Error al crear usuario: {error_detail.get('msg', 'Error desconocido')}")
+                
+                user = response.json()
+                user_id = user.get("id")
+                
+                logger.info(f"✅ Usuario creado exitosamente: {email} (ID: {user_id})")
+                
+                # ✅ Crear perfil manualmente
+                try:
+                    await client.post(
+                        f"{self.url}/rest/v1/profiles",
+                        headers={
+                            "apikey": self.service_key,
+                            "Authorization": f"Bearer {self.service_key}",
+                            "Content-Type": "application/json",
+                            "Prefer": "return=minimal"
+                        },
+                        json={
+                            "id": user_id,
+                            "email": email,
+                            "username": username or email.split('@')[0],
+                            "full_name": full_name or "",
+                            "created_at": datetime.now().isoformat()
+                        }
+                    )
+                    logger.info(f"✅ Perfil creado para usuario: {user_id}")
+                except Exception as profile_error:
+                    logger.warning(f"⚠️ Error creando perfil (no crítico): {profile_error}")
+                
+                return {
+                    "user_id": user_id,
+                    "email": email,
+                    "username": username or email.split('@')[0],
+                    "created_at": datetime.now().isoformat(),
+                    "user_metadata": metadata
                 }
-            })
-            
-            if not response or not response.user:
-                logger.error("❌ No se pudo crear el usuario - respuesta vacía de Supabase")
-                raise Exception("Database error creating new user")
-            
-            user = response.user
-            logger.info(f"✅ Usuario creado exitosamente: {email} (ID: {user.id})")
-            logger.info(f"   El perfil en public.profiles se crea automáticamente por el trigger")
-            
-            return {
-                "user_id": user.id,
-                "email": user.email,
-                "username": username or email.split('@')[0],
-                "created_at": user.created_at,
-                "user_metadata": user.user_metadata or {}
-            }
-            
+                
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"❌ Error creando usuario en Supabase: {error_msg}")
+            logger.error(f"❌ Error creando usuario: {error_msg}")
             
-            if "already registered" in error_msg.lower() or "already exists" in error_msg.lower():
+            if "ya existe" in error_msg.lower():
                 raise Exception("El usuario ya existe")
-            elif "password" in error_msg.lower():
-                raise Exception("La contraseña no cumple con los requisitos de seguridad")
-            elif "Database error" in error_msg:
-                raise Exception(f"Error de base de datos al crear usuario. Verifica los logs de Supabase.")
-            else:
-                raise Exception(f"Error creando usuario: {error_msg[:200]}")
+            raise Exception(f"Error al registrar usuario: {error_msg[:200]}")
 
     # ============================================
     # MÉTODO LOGIN
     # ============================================
     
     async def login(self, email: str, password: str) -> Optional[Dict[str, Any]]:
-        """
-        Inicia sesión con email y contraseña en Supabase Auth
-        """
         logger.info(f"🔐 Intentando login para: {email}")
         
         if not self.is_configured:
-            logger.error("❌ Supabase no está configurado")
             raise Exception("Supabase no está configurado")
         
         try:
@@ -227,28 +222,18 @@ class SupabaseAuthService:
         except Exception as e:
             error_msg = str(e)
             logger.error(f"❌ Error en login: {error_msg}")
-            
             if "Invalid login credentials" in error_msg:
                 raise Exception("Email o contraseña incorrectos")
-            else:
-                raise Exception(f"Error en login: {error_msg}")
+            raise Exception(f"Error en login: {error_msg}")
 
     # ============================================
     # MÉTODO VERIFY_TOKEN
     # ============================================
 
     async def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
-        """
-        Verifica un token JWT y retorna la información del usuario
-        Soporta:
-        1. Tokens de Supabase (para login con email/contraseña)
-        2. Tokens generados localmente (para login con passkey)
-        """
         if not self.is_configured:
-            logger.error("❌ Supabase no está configurado")
             return None
 
-        # ✅ PRIMERO: Intentar verificar con Supabase
         try:
             logger.debug(f"🔍 Verificando token con Supabase: {token[:30]}...")
             admin_client = self.get_admin_client()
@@ -256,8 +241,6 @@ class SupabaseAuthService:
             
             if user_response and user_response.user:
                 user = user_response.user
-                logger.debug(f"✅ Token válido para usuario (Supabase): {user.id}")
-                
                 return {
                     "user_id": user.id,
                     "email": user.email,
@@ -270,22 +253,11 @@ class SupabaseAuthService:
                 }
                 
         except Exception as e:
-            error_msg = str(e)
-            logger.debug(f"⚠️ Verificación con Supabase falló: {error_msg[:100]}")
+            logger.debug(f"⚠️ Verificación con Supabase falló: {str(e)[:100]}")
             
-            # ✅ SEGUNDO: Intentar verificar con nuestro propio JWT (para passkey login)
             try:
-                logger.debug(f"🔍 Intentando verificar token local: {token[:30]}...")
-                
-                payload = jwt.decode(
-                    token, 
-                    settings.SECRET_KEY, 
-                    algorithms=["HS256"]
-                )
-                
+                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
                 user_id = payload.get("sub")
-                logger.debug(f"✅ Token local válido para usuario: {user_id}")
-                
                 user_metadata = payload.get("user_metadata", {})
                 
                 return {
@@ -302,11 +274,9 @@ class SupabaseAuthService:
             except jwt.ExpiredSignatureError:
                 logger.warning("⚠️ Token local expirado")
                 return None
-            except jwt.InvalidTokenError as jwt_error:
-                logger.error(f"❌ Token local inválido: {jwt_error}")
+            except jwt.InvalidTokenError:
                 return None
-            except Exception as e:
-                logger.error(f"❌ Error verificando token local: {e}")
+            except Exception:
                 return None
 
     # ============================================
@@ -314,22 +284,17 @@ class SupabaseAuthService:
     # ============================================
 
     async def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Obtiene información de un usuario por su ID"""
         if not self.is_configured:
-            logger.error("❌ Supabase no está configurado")
             return None
 
         try:
-            logger.debug(f"🔍 Obteniendo usuario por ID: {user_id}")
             admin_client = self.get_admin_client()
             user_response = admin_client.auth.admin.get_user_by_id(user_id)
             
             if not user_response or not user_response.user:
-                logger.warning(f"⚠️ Usuario no encontrado: {user_id}")
                 return None
 
             user = user_response.user
-            logger.debug(f"✅ Usuario encontrado: {user.email}")
             
             return {
                 "user_id": user.id,
@@ -342,23 +307,19 @@ class SupabaseAuthService:
                 "last_sign_in_at": user.last_sign_in_at.isoformat() if user.last_sign_in_at else None
             }
         except Exception as e:
-            logger.error(f"❌ Error obteniendo usuario por ID {user_id}: {str(e)}", exc_info=True)
+            logger.error(f"❌ Error obteniendo usuario por ID {user_id}: {str(e)}")
             return None
 
     async def update_user(self, user_id: str, email: str = None, password: str = None, 
-                          username: str = None, full_name: str = None, metadata: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
-        """Actualiza un usuario en Supabase Auth"""
+                          username: str = None, full_name: str = None, 
+                          metadata: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
         if not self.is_configured:
-            logger.error("❌ Supabase no está configurado")
             return None
 
         try:
-            logger.info(f"✏️ Actualizando usuario: {user_id}")
             admin_client = self.get_admin_client()
-            
             current_user_data = await self.get_user_by_id(user_id)
             if not current_user_data:
-                logger.error(f"❌ Usuario no encontrado: {user_id}")
                 return None
 
             update_data = {}
@@ -367,64 +328,45 @@ class SupabaseAuthService:
             if password:
                 update_data["password"] = password
 
-            current_metadata = current_user_data.get("user_metadata", {})
-            new_metadata = current_metadata.copy()
-
+            current_metadata = current_user_data.get("user_metadata", {}).copy()
             if username:
-                new_metadata["username"] = username
+                current_metadata["username"] = username
             if full_name:
-                new_metadata["full_name"] = full_name
+                current_metadata["full_name"] = full_name
             if metadata:
-                new_metadata.update(metadata)
+                current_metadata.update(metadata)
 
-            if new_metadata != current_metadata:
-                update_data["user_metadata"] = new_metadata
+            update_data["user_metadata"] = current_metadata
 
             if update_data:
                 response = admin_client.auth.admin.update_user_by_id(user_id, update_data)
                 if response and response.user:
-                    logger.info(f"✅ Usuario actualizado exitosamente: {user_id}")
+                    logger.info(f"✅ Usuario actualizado: {user_id}")
                     return await self.get_user_by_id(user_id)
             
-            logger.info(f"ℹ️ No se realizaron cambios para usuario: {user_id}")
             return current_user_data
-
         except Exception as e:
-            logger.error(f"❌ Error actualizando usuario {user_id}: {str(e)}", exc_info=True)
+            logger.error(f"❌ Error actualizando usuario {user_id}: {str(e)}")
             return None
 
     async def update_profile(self, user_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Actualiza el perfil del usuario (full_name, bio, avatar, banner)"""
         if not self.is_configured:
-            logger.error("❌ Supabase no está configurado")
             return None
 
         try:
-            logger.info(f"✏️ Actualizando perfil para usuario: {user_id}")
-            
             current_user_data = await self.get_user_by_id(user_id)
             if not current_user_data:
-                logger.error(f"❌ Usuario no encontrado: {user_id}")
                 return None
 
             current_metadata = current_user_data.get("user_metadata", {}).copy()
             
             changed = False
-            if "full_name" in updates:
-                current_metadata["full_name"] = updates["full_name"]
-                changed = True
-            if "bio" in updates:
-                current_metadata["bio"] = updates["bio"]
-                changed = True
-            if "avatar" in updates:
-                current_metadata["avatar"] = updates["avatar"]
-                changed = True
-            if "banner" in updates:
-                current_metadata["banner"] = updates["banner"]
-                changed = True
+            for field in ["full_name", "bio", "avatar", "banner"]:
+                if field in updates:
+                    current_metadata[field] = updates[field]
+                    changed = True
 
             if not changed:
-                logger.info(f"ℹ️ No se realizaron cambios en el perfil")
                 return current_user_data
 
             update_data = {"user_metadata": current_metadata}
@@ -432,39 +374,29 @@ class SupabaseAuthService:
             response = admin_client.auth.admin.update_user_by_id(user_id, update_data)
             
             if response and response.user:
-                logger.info(f"✅ Perfil actualizado exitosamente para usuario: {user_id}")
+                logger.info(f"✅ Perfil actualizado: {user_id}")
                 return await self.get_user_by_id(user_id)
             
-            logger.warning(f"⚠️ No se pudo actualizar el perfil para usuario: {user_id}")
             return current_user_data
-
         except Exception as e:
-            logger.error(f"❌ Error actualizando perfil para usuario {user_id}: {str(e)}", exc_info=True)
+            logger.error(f"❌ Error actualizando perfil {user_id}: {str(e)}")
             return None
 
     async def delete_user(self, user_id: str) -> bool:
-        """Elimina un usuario de Supabase Auth"""
         if not self.is_configured:
-            logger.error("❌ Supabase no está configurado")
             return False
         try:
-            logger.info(f"🗑️ Eliminando usuario: {user_id}")
             admin_client = self.get_admin_client()
             admin_client.auth.admin.delete_user(user_id)
-            logger.info(f"✅ Usuario eliminado exitosamente: {user_id}")
+            logger.info(f"✅ Usuario eliminado: {user_id}")
             return True
         except Exception as e:
-            logger.error(f"❌ Error eliminando usuario {user_id}: {str(e)}", exc_info=True)
+            logger.error(f"❌ Error eliminando usuario {user_id}: {str(e)}")
             return False
 
     async def update_user_password(self, user_id: str, new_password: str) -> bool:
-        """Actualiza la contraseña de un usuario"""
         logger.info(f"🔐 Actualizando contraseña para usuario: {user_id}")
         result = await self.update_user(user_id, password=new_password)
-        if result:
-            logger.info(f"✅ Contraseña actualizada exitosamente")
-        else:
-            logger.error(f"❌ Error actualizando contraseña")
         return result is not None
 
     # ============================================
@@ -472,81 +404,56 @@ class SupabaseAuthService:
     # ============================================
 
     async def get_token_version(self, user_id: str) -> int:
-        """Obtiene la versión actual del token para un usuario"""
         try:
             user_data = await self.get_user_by_id(user_id)
             if not user_data:
-                logger.warning(f"⚠️ Usuario no encontrado para token_version: {user_id}")
                 return 1
-            
-            user_metadata = user_data.get("user_metadata", {})
-            token_version = user_metadata.get("token_version", 1)
-            
-            logger.debug(f"📌 Token version para {user_id}: {token_version}")
-            return token_version
-            
+            return user_data.get("user_metadata", {}).get("token_version", 1)
         except Exception as e:
-            logger.error(f"❌ Error obteniendo token_version para {user_id}: {e}")
+            logger.error(f"❌ Error obteniendo token_version: {e}")
             return 1
 
     async def increment_token_version(self, user_id: str) -> bool:
-        """Incrementa la versión del token para invalidar sesiones activas"""
         try:
-            logger.info(f"🔄 Incrementando token_version para usuario: {user_id}")
-            
             current_version = await self.get_token_version(user_id)
             new_version = current_version + 1
             
             user_data = await self.get_user_by_id(user_id)
             if not user_data:
-                logger.error(f"❌ No se encontró usuario: {user_id}")
                 return False
             
             current_metadata = user_data.get("user_metadata", {})
             new_metadata = {**current_metadata, "token_version": new_version}
             
             admin_client = self.get_admin_client()
-            admin_client.auth.admin.update_user_by_id(
-                user_id,
-                {"user_metadata": new_metadata}
-            )
+            admin_client.auth.admin.update_user_by_id(user_id, {"user_metadata": new_metadata})
             
-            logger.info(f"✅ Token_version incrementado: {current_version} → {new_version} para {user_id}")
+            logger.info(f"✅ Token_version incrementado: {current_version} → {new_version}")
             return True
-            
         except Exception as e:
-            logger.error(f"❌ Error incrementando token_version para {user_id}: {e}")
+            logger.error(f"❌ Error incrementando token_version: {e}")
             return False
 
     async def verify_token_version(self, token: str, user_id: str) -> bool:
-        """Verifica que la versión del token coincida con la actual"""
         try:
             current_version = await self.get_token_version(user_id)
             token_version = 1
-            
             try:
                 payload = jwt.decode(token, options={"verify_signature": False})
                 token_version = payload.get("token_version", 1)
-            except Exception as e:
-                logger.debug(f"⚠️ No se pudo extraer token_version del payload: {e}")
+            except Exception:
+                pass
             
             is_valid = token_version == current_version
-            
             if not is_valid:
-                logger.warning(f"⚠️ Token version mismatch para {user_id}: "
-                             f"token={token_version}, current={current_version}")
-            
+                logger.warning(f"⚠️ Token version mismatch para {user_id}")
             return is_valid
-            
         except Exception as e:
             logger.error(f"❌ Error verificando token_version: {e}")
             return True
 
     def is_available(self) -> bool:
-        """Verifica si el servicio está disponible"""
         available = self.is_configured and self._client is not None
-        if not available:
-            logger.debug(f"⚠️ SupabaseAuthService no disponible")
         return available
 
 
