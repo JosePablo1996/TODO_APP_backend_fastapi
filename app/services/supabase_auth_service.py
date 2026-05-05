@@ -102,7 +102,7 @@ class SupabaseAuthService:
         return client
 
     # ============================================
-    # MÉTODO CREATE_USER (CORREGIDO)
+    # MÉTODO CREATE_USER (CORREGIDO - USA SIGN_UP PÚBLICO)
     # ============================================
     
     async def create_user(
@@ -115,6 +115,7 @@ class SupabaseAuthService:
     ) -> Optional[Dict[str, Any]]:
         """
         Crea un nuevo usuario en Supabase Auth.
+        ✅ Usa el endpoint público de registro (sign_up) en lugar del admin.
         El perfil en public.profiles se crea automáticamente por el trigger on_auth_user_created.
         """
         logger.info(f"📝 Creando usuario en Supabase: {email}")
@@ -124,7 +125,9 @@ class SupabaseAuthService:
             raise Exception("Supabase no está configurado")
         
         try:
-            admin_client = self.get_admin_client()
+            # ✅ USAR CLIENTE ANÓNIMO (ENDPOINT PÚBLICO)
+            if not self._anon_client:
+                self._anon_client = create_client(self.url, self.anon_key)
             
             # Preparar metadatos del usuario
             metadata = user_metadata or {}
@@ -134,21 +137,20 @@ class SupabaseAuthService:
                 metadata["full_name"] = full_name
             metadata["token_version"] = 1
             
-            # Preparar datos del usuario
-            user_data = {
+            logger.debug(f"   Registrando usuario: email={email}, username={username}")
+            
+            # ✅ Registrar usando sign_up (endpoint público) con auto-confirmación
+            response = self._anon_client.auth.sign_up({
                 "email": email,
                 "password": password,
-                "email_confirm": True,
-                "user_metadata": metadata
-            }
-            
-            logger.debug(f"   Creando usuario: email={email}, username={username}")
-            
-            # ✅ Crear usuario - el trigger on_auth_user_created crea el perfil automáticamente
-            response = admin_client.auth.admin.create_user(user_data)
+                "options": {
+                    "data": metadata,
+                    "email_confirm": True  # Auto-confirmar email
+                }
+            })
             
             if not response or not response.user:
-                logger.error("❌ No se pudo crear el usuario - respuesta vacía")
+                logger.error("❌ No se pudo crear el usuario - respuesta vacía de Supabase")
                 raise Exception("Database error creating new user")
             
             user = response.user
@@ -167,7 +169,7 @@ class SupabaseAuthService:
             error_msg = str(e)
             logger.error(f"❌ Error creando usuario en Supabase: {error_msg}")
             
-            if "User already registered" in error_msg or "already exists" in error_msg:
+            if "already registered" in error_msg.lower() or "already exists" in error_msg.lower():
                 raise Exception("El usuario ya existe")
             elif "password" in error_msg.lower():
                 raise Exception("La contraseña no cumple con los requisitos de seguridad")
@@ -232,7 +234,7 @@ class SupabaseAuthService:
                 raise Exception(f"Error en login: {error_msg}")
 
     # ============================================
-    # MÉTODO VERIFY_TOKEN - ACTUALIZADO (maneja ambos tipos de tokens)
+    # MÉTODO VERIFY_TOKEN
     # ============================================
 
     async def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
@@ -275,7 +277,6 @@ class SupabaseAuthService:
             try:
                 logger.debug(f"🔍 Intentando verificar token local: {token[:30]}...")
                 
-                # Decodificar el token con nuestra SECRET_KEY
                 payload = jwt.decode(
                     token, 
                     settings.SECRET_KEY, 
@@ -313,9 +314,7 @@ class SupabaseAuthService:
     # ============================================
 
     async def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Obtiene información de un usuario por su ID
-        """
+        """Obtiene información de un usuario por su ID"""
         if not self.is_configured:
             logger.error("❌ Supabase no está configurado")
             return None
@@ -348,9 +347,7 @@ class SupabaseAuthService:
 
     async def update_user(self, user_id: str, email: str = None, password: str = None, 
                           username: str = None, full_name: str = None, metadata: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
-        """
-        Actualiza un usuario en Supabase Auth
-        """
+        """Actualiza un usuario en Supabase Auth"""
         if not self.is_configured:
             logger.error("❌ Supabase no está configurado")
             return None
@@ -367,28 +364,21 @@ class SupabaseAuthService:
             update_data = {}
             if email:
                 update_data["email"] = email
-                logger.debug(f"   Actualizando email: {email}")
             if password:
                 update_data["password"] = password
-                logger.debug(f"   Actualizando password")
 
             current_metadata = current_user_data.get("user_metadata", {})
             new_metadata = current_metadata.copy()
 
             if username:
                 new_metadata["username"] = username
-                logger.debug(f"   Actualizando username: {username}")
             if full_name:
                 new_metadata["full_name"] = full_name
-                logger.debug(f"   Actualizando full_name: {full_name}")
-            
             if metadata:
                 new_metadata.update(metadata)
-                logger.debug(f"   Actualizando metadata adicional")
 
             if new_metadata != current_metadata:
                 update_data["user_metadata"] = new_metadata
-                logger.debug(f"   Metadata actualizada")
 
             if update_data:
                 response = admin_client.auth.admin.update_user_by_id(user_id, update_data)
@@ -404,16 +394,13 @@ class SupabaseAuthService:
             return None
 
     async def update_profile(self, user_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Método específico para actualizar el perfil (full_name, bio, avatar, banner)
-        """
+        """Actualiza el perfil del usuario (full_name, bio, avatar, banner)"""
         if not self.is_configured:
             logger.error("❌ Supabase no está configurado")
             return None
 
         try:
             logger.info(f"✏️ Actualizando perfil para usuario: {user_id}")
-            logger.debug(f"   Actualizaciones: {list(updates.keys())}")
             
             current_user_data = await self.get_user_by_id(user_id)
             if not current_user_data:
@@ -426,19 +413,15 @@ class SupabaseAuthService:
             if "full_name" in updates:
                 current_metadata["full_name"] = updates["full_name"]
                 changed = True
-                logger.debug(f"   Actualizando full_name: {updates['full_name']}")
             if "bio" in updates:
                 current_metadata["bio"] = updates["bio"]
                 changed = True
-                logger.debug(f"   Actualizando bio: {updates['bio'][:50]}...")
             if "avatar" in updates:
                 current_metadata["avatar"] = updates["avatar"]
                 changed = True
-                logger.debug(f"   Actualizando avatar: {updates['avatar'][:50]}...")
             if "banner" in updates:
                 current_metadata["banner"] = updates["banner"]
                 changed = True
-                logger.debug(f"   Actualizando banner: {updates['banner'][:50]}...")
 
             if not changed:
                 logger.info(f"ℹ️ No se realizaron cambios en el perfil")
