@@ -611,16 +611,19 @@ async def logout(request: RefreshTokenRequest):
 # SOPORTA WEB (REACT) Y MÓVIL (FLUTTER)
 # ============================================
 
+# ============================================
+# ✅ ENDPOINT FORGOT-PASSWORD - CORREGIDO
+# Ahora usa la página de reset de Supabase sin redirect_to
+# ============================================
+
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
 async def forgot_password(request: Request, body: ForgotPasswordRequest):
     """
     Solicita recuperación de contraseña.
     
-    ✅ Soporta detección automática de plataforma:
-    - Web (React): usa URL normal (FRONTEND_URL/reset-password)
-    - Móvil (Flutter): usa deep link (todoappmanager://reset-password)
-    
-    También acepta header 'X-Platform' para forzar plataforma específica.
+    Envía un email con un enlace de recuperación.
+    Supabase muestra su propia página de reset de contraseña,
+    que funciona en cualquier navegador (web y móvil).
     """
     logger.info(f"📧 Solicitud de recuperación para: {body.email}")
     
@@ -639,26 +642,12 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
                 detail="Cliente de autenticación no disponible"
             )
         
-        # ✅ DETECTAR PLATAFORMA (web vs mobile)
-        platform = detect_platform(request)
+        # ✅ Enviar email SIN redirect_to
+        # Supabase usará su propia página de reset de contraseña
+        # El enlace será: https://...supabase.co/auth/v1/verify?token=xxx&type=recovery
+        client.auth.reset_password_for_email(body.email)
         
-        # ✅ SELECCIONAR URL DE REDIRECCIÓN SEGÚN PLATAFORMA
-        if platform == 'mobile':
-            redirect_url = MOBILE_RESET_PASSWORD_URL
-            logger.info(f"📱 Usando deep link para app móvil: {redirect_url}")
-        else:
-            redirect_url = WEB_RESET_PASSWORD_URL
-            logger.info(f"🌐 Usando URL para web: {redirect_url}")
-        
-        # ✅ Enviar email de recuperación con redirect_to correcto
-        client.auth.reset_password_for_email(
-            body.email,
-            options={
-                "redirect_to": redirect_url
-            }
-        )
-        
-        logger.info(f"✅ Email de recuperación enviado a: {body.email} (plataforma: {platform})")
+        logger.info(f"✅ Email de recuperación enviado a: {body.email}")
         
         return ForgotPasswordResponse(
             message="Si el email existe en nuestro sistema, recibirás instrucciones para restablecer tu contraseña."
@@ -672,7 +661,6 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
         return ForgotPasswordResponse(
             message="Si el email existe en nuestro sistema, recibirás instrucciones para restablecer tu contraseña."
         )
-
 
 # ============================================
 # ENDPOINT RESET-PASSWORD (SIN CAMBIOS)
