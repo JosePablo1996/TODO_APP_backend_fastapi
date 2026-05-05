@@ -102,79 +102,79 @@ class SupabaseAuthService:
         return client
 
     # ============================================
-    # MÉTODO CREATE_USER
+    # MÉTODO CREATE_USER (CORREGIDO)
     # ============================================
     
     async def create_user(
-    self, 
-    email: str, 
-    password: str, 
-    username: Optional[str] = None,
-    full_name: Optional[str] = None,
-    user_metadata: Optional[Dict[str, Any]] = None
-) -> Optional[Dict[str, Any]]:
-    """
-    Crea un nuevo usuario en Supabase Auth.
-    El perfil en public.profiles se crea automáticamente por el trigger on_auth_user_created.
-    """
-    logger.info(f"📝 Creando usuario en Supabase: {email}")
-    
-    if not self.is_configured:
-        logger.error("❌ Supabase no está configurado")
-        raise Exception("Supabase no está configurado")
-    
-    try:
-        admin_client = self.get_admin_client()
+        self, 
+        email: str, 
+        password: str, 
+        username: Optional[str] = None,
+        full_name: Optional[str] = None,
+        user_metadata: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Crea un nuevo usuario en Supabase Auth.
+        El perfil en public.profiles se crea automáticamente por el trigger on_auth_user_created.
+        """
+        logger.info(f"📝 Creando usuario en Supabase: {email}")
         
-        # Preparar metadatos del usuario
-        metadata = user_metadata or {}
-        if username:
-            metadata["username"] = username
-        if full_name:
-            metadata["full_name"] = full_name
-        metadata["token_version"] = 1
+        if not self.is_configured:
+            logger.error("❌ Supabase no está configurado")
+            raise Exception("Supabase no está configurado")
         
-        # Preparar datos del usuario
-        user_data = {
-            "email": email,
-            "password": password,
-            "email_confirm": True,
-            "user_metadata": metadata
-        }
-        
-        logger.debug(f"   Creando usuario: email={email}, username={username}")
-        
-        # ✅ Crear usuario - el trigger on_auth_user_created crea el perfil automáticamente
-        response = admin_client.auth.admin.create_user(user_data)
-        
-        if not response or not response.user:
-            logger.error("❌ No se pudo crear el usuario - respuesta vacía")
-            raise Exception("Database error creating new user")
-        
-        user = response.user
-        logger.info(f"✅ Usuario creado exitosamente: {email} (ID: {user.id})")
-        logger.info(f"   El perfil en public.profiles se crea automáticamente por el trigger")
-        
-        return {
-            "user_id": user.id,
-            "email": user.email,
-            "username": username or email.split('@')[0],
-            "created_at": user.created_at,
-            "user_metadata": user.user_metadata or {}
-        }
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"❌ Error creando usuario en Supabase: {error_msg}")
-        
-        if "User already registered" in error_msg or "already exists" in error_msg:
-            raise Exception("El usuario ya existe")
-        elif "password" in error_msg.lower():
-            raise Exception("La contraseña no cumple con los requisitos de seguridad")
-        elif "Database error" in error_msg:
-            raise Exception(f"Error de base de datos al crear usuario. Verifica los logs de Supabase.")
-        else:
-            raise Exception(f"Error creando usuario: {error_msg[:200]}")
+        try:
+            admin_client = self.get_admin_client()
+            
+            # Preparar metadatos del usuario
+            metadata = user_metadata or {}
+            if username:
+                metadata["username"] = username
+            if full_name:
+                metadata["full_name"] = full_name
+            metadata["token_version"] = 1
+            
+            # Preparar datos del usuario
+            user_data = {
+                "email": email,
+                "password": password,
+                "email_confirm": True,
+                "user_metadata": metadata
+            }
+            
+            logger.debug(f"   Creando usuario: email={email}, username={username}")
+            
+            # ✅ Crear usuario - el trigger on_auth_user_created crea el perfil automáticamente
+            response = admin_client.auth.admin.create_user(user_data)
+            
+            if not response or not response.user:
+                logger.error("❌ No se pudo crear el usuario - respuesta vacía")
+                raise Exception("Database error creating new user")
+            
+            user = response.user
+            logger.info(f"✅ Usuario creado exitosamente: {email} (ID: {user.id})")
+            logger.info(f"   El perfil en public.profiles se crea automáticamente por el trigger")
+            
+            return {
+                "user_id": user.id,
+                "email": user.email,
+                "username": username or email.split('@')[0],
+                "created_at": user.created_at,
+                "user_metadata": user.user_metadata or {}
+            }
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"❌ Error creando usuario en Supabase: {error_msg}")
+            
+            if "User already registered" in error_msg or "already exists" in error_msg:
+                raise Exception("El usuario ya existe")
+            elif "password" in error_msg.lower():
+                raise Exception("La contraseña no cumple con los requisitos de seguridad")
+            elif "Database error" in error_msg:
+                raise Exception(f"Error de base de datos al crear usuario. Verifica los logs de Supabase.")
+            else:
+                raise Exception(f"Error creando usuario: {error_msg[:200]}")
 
     # ============================================
     # MÉTODO LOGIN
@@ -485,14 +485,11 @@ class SupabaseAuthService:
         return result is not None
 
     # ============================================
-    # MÉTODOS PARA TOKEN_VERSION (Cierre de sesiones activas)
+    # MÉTODOS PARA TOKEN_VERSION
     # ============================================
 
     async def get_token_version(self, user_id: str) -> int:
-        """
-        Obtiene la versión actual del token para un usuario
-        Si no existe, retorna 1 (versión inicial)
-        """
+        """Obtiene la versión actual del token para un usuario"""
         try:
             user_data = await self.get_user_by_id(user_id)
             if not user_data:
@@ -507,22 +504,16 @@ class SupabaseAuthService:
             
         except Exception as e:
             logger.error(f"❌ Error obteniendo token_version para {user_id}: {e}")
-            return 1  # Valor por defecto seguro
+            return 1
 
     async def increment_token_version(self, user_id: str) -> bool:
-        """
-        Incrementa la versión del token para un usuario
-        Esto invalida TODAS las sesiones activas anteriores
-        Retorna True si fue exitoso, False si no
-        """
+        """Incrementa la versión del token para invalidar sesiones activas"""
         try:
             logger.info(f"🔄 Incrementando token_version para usuario: {user_id}")
             
-            # Obtener versión actual
             current_version = await self.get_token_version(user_id)
             new_version = current_version + 1
             
-            # Obtener usuario actual para preservar otros metadatos
             user_data = await self.get_user_by_id(user_id)
             if not user_data:
                 logger.error(f"❌ No se encontró usuario: {user_id}")
@@ -531,7 +522,6 @@ class SupabaseAuthService:
             current_metadata = user_data.get("user_metadata", {})
             new_metadata = {**current_metadata, "token_version": new_version}
             
-            # Actualizar metadata en Supabase Auth
             admin_client = self.get_admin_client()
             admin_client.auth.admin.update_user_by_id(
                 user_id,
@@ -546,19 +536,12 @@ class SupabaseAuthService:
             return False
 
     async def verify_token_version(self, token: str, user_id: str) -> bool:
-        """
-        Verifica que la versión del token coincida con la versión actual del usuario
-        Retorna True si es válido, False si está desactualizado
-        """
+        """Verifica que la versión del token coincida con la actual"""
         try:
-            # Obtener versión actual del usuario
             current_version = await self.get_token_version(user_id)
-            
-            # Intentar extraer versión del token (si está en el payload)
-            token_version = 1  # Valor por defecto
+            token_version = 1
             
             try:
-                # Decodificar sin verificar firma solo para leer metadata
                 payload = jwt.decode(token, options={"verify_signature": False})
                 token_version = payload.get("token_version", 1)
             except Exception as e:
@@ -574,7 +557,7 @@ class SupabaseAuthService:
             
         except Exception as e:
             logger.error(f"❌ Error verificando token_version: {e}")
-            return True  # En caso de error, permitir acceso (fail open)
+            return True
 
     def is_available(self) -> bool:
         """Verifica si el servicio está disponible"""
