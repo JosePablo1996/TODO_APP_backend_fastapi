@@ -106,88 +106,75 @@ class SupabaseAuthService:
     # ============================================
     
     async def create_user(
-        self, 
-        email: str, 
-        password: str, 
-        username: Optional[str] = None,
-        full_name: Optional[str] = None,
-        user_metadata: Optional[Dict[str, Any]] = None
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Crea un nuevo usuario en Supabase Auth
-        """
-        logger.info(f"📝 Creando usuario en Supabase: {email}")
+    self, 
+    email: str, 
+    password: str, 
+    username: Optional[str] = None,
+    full_name: Optional[str] = None,
+    user_metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Crea un nuevo usuario en Supabase Auth.
+    El perfil en public.profiles se crea automáticamente por el trigger on_auth_user_created.
+    """
+    logger.info(f"📝 Creando usuario en Supabase: {email}")
+    
+    if not self.is_configured:
+        logger.error("❌ Supabase no está configurado")
+        raise Exception("Supabase no está configurado")
+    
+    try:
+        admin_client = self.get_admin_client()
         
-        if not self.is_configured:
-            logger.error("❌ Supabase no está configurado")
-            raise Exception("Supabase no está configurado")
+        # Preparar metadatos del usuario
+        metadata = user_metadata or {}
+        if username:
+            metadata["username"] = username
+        if full_name:
+            metadata["full_name"] = full_name
+        metadata["token_version"] = 1
         
-        try:
-            admin_client = self.get_admin_client()
-            
-            # Preparar metadatos del usuario
-            metadata = user_metadata or {}
-            if username:
-                metadata["username"] = username
-            if full_name:
-                metadata["full_name"] = full_name
-            
-            # Inicializar token_version en 1 para nuevos usuarios
-            metadata["token_version"] = 1
-            
-            # Preparar datos del usuario
-            user_data = {
-                "email": email,
-                "password": password,
-                "email_confirm": True,
-                "user_metadata": metadata
-            }
-            
-            logger.debug(f"   Creando usuario con datos: email={email}, username={username}")
-            
-            # Crear usuario usando el cliente admin de Supabase
-            response = admin_client.auth.admin.create_user(user_data)
-            
-            if not response or not response.user:
-                logger.error("❌ No se pudo crear el usuario")
-                return None
-            
-            user = response.user
-            logger.info(f"✅ Usuario creado exitosamente: {email} (ID: {user.id})")
-            
-            # Crear perfil en la tabla profiles
-            try:
-                profile_data = {
-                    "id": user.id,
-                    "email": email,
-                    "username": username or email.split('@')[0],
-                    "full_name": full_name or "",
-                    "created_at": datetime.now().isoformat()
-                }
-                
-                admin_client.table("profiles").insert(profile_data).execute()
-                logger.info(f"✅ Perfil creado para usuario: {user.id}")
-            except Exception as profile_error:
-                logger.warning(f"⚠️ Error creando perfil (no crítico): {profile_error}")
-            
-            return {
-                "user_id": user.id,
-                "email": user.email,
-                "username": username or email.split('@')[0],
-                "created_at": user.created_at,
-                "user_metadata": user.user_metadata or {}
-            }
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"❌ Error creando usuario en Supabase: {error_msg}")
-            
-            if "User already registered" in error_msg or "already exists" in error_msg:
-                raise Exception("El usuario ya existe")
-            elif "password" in error_msg.lower():
-                raise Exception("La contraseña no cumple con los requisitos de seguridad")
-            else:
-                raise Exception(f"Error creando usuario: {error_msg}")
+        # Preparar datos del usuario
+        user_data = {
+            "email": email,
+            "password": password,
+            "email_confirm": True,
+            "user_metadata": metadata
+        }
+        
+        logger.debug(f"   Creando usuario: email={email}, username={username}")
+        
+        # ✅ Crear usuario - el trigger on_auth_user_created crea el perfil automáticamente
+        response = admin_client.auth.admin.create_user(user_data)
+        
+        if not response or not response.user:
+            logger.error("❌ No se pudo crear el usuario - respuesta vacía")
+            raise Exception("Database error creating new user")
+        
+        user = response.user
+        logger.info(f"✅ Usuario creado exitosamente: {email} (ID: {user.id})")
+        logger.info(f"   El perfil en public.profiles se crea automáticamente por el trigger")
+        
+        return {
+            "user_id": user.id,
+            "email": user.email,
+            "username": username or email.split('@')[0],
+            "created_at": user.created_at,
+            "user_metadata": user.user_metadata or {}
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"❌ Error creando usuario en Supabase: {error_msg}")
+        
+        if "User already registered" in error_msg or "already exists" in error_msg:
+            raise Exception("El usuario ya existe")
+        elif "password" in error_msg.lower():
+            raise Exception("La contraseña no cumple con los requisitos de seguridad")
+        elif "Database error" in error_msg:
+            raise Exception(f"Error de base de datos al crear usuario. Verifica los logs de Supabase.")
+        else:
+            raise Exception(f"Error creando usuario: {error_msg[:200]}")
 
     # ============================================
     # MÉTODO LOGIN
