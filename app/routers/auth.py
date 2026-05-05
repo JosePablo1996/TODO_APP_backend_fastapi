@@ -49,6 +49,9 @@ from app.models import (
     TwoFactorVerifyResponse,
     TwoFactorDisableRequest,
     TwoFactorStatusResponse,
+    # ✅ NUEVOS: Reset de contraseña por código OTP
+    ResetPasswordOtpRequest,
+    ResetPasswordOtpVerifyRequest,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
@@ -660,6 +663,181 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
         # Por seguridad, siempre devolver el mismo mensaje
         return ForgotPasswordResponse(
             message="Si el email existe en nuestro sistema, recibirás instrucciones para restablecer tu contraseña."
+        )
+        
+# ============================================
+# ✅ NUEVO: RESET DE CONTRASEÑA POR CÓDIGO OTP
+# ============================================
+
+# Almacenamiento temporal para códigos de reset
+reset_otp_storage: Dict[str, dict] = {}
+
+@router.post("/forgot-password-otp", response_model=ForgotPasswordResponse)
+async def forgot_password_otp(request: ForgotPasswordRequest):
+    """
+    ✅ NUEVO: Envía un código OTP de 6 dígitos para reset de contraseña.
+    No usa enlaces, solo un código que el usuario ingresa en la app.
+    """
+    logger.info(f"📧 Solicitando código OTP para reset: {request.email}")
+    
+    if not supabase_auth.is_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Servicio de autenticación no disponible"
+        )
+    
+    # Verificar que el email existe en Supabase
+    try:
+        admin_client = supabase_auth.get_admin_client()
+        users_response = admin_client.auth.admin.list_users()
+        user_exists = False
+        if users_response and hasattr(users_response, 'users') and users_response.users:
+            for user in users_response.users:
+                if user.email == request.email:
+                    user_exists = True
+                    break
+        
+        if not user_exists:
+            # Por seguridad, no revelar si el email existe o no
+            logger.info(f"📧 Email no encontrado: {request.email}")
+            return ForgotPasswordResponse(
+                message="Si el email existe en nuestro sistema, recibirás un código de verificación."
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Error verificando email: {e}")
+    
+    # Generar código de 6 dígitos
+    code = ''.join(random.choices(string.digits, k=6))
+    
+    # Guardar código (expira en 15 minutos)
+    reset_otp_storage[request.email] = {
+        "code": code,
+        "expires_at": datetime.now() + timedelta(minutes=15),
+        "attempts": 0
+    }
+    
+    # Enviar email con el código
+    try:
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"></head>
+        <body style="font-family: Arial, sans-serif; padding: 20px;">
+            <div style="max-width: 500px; margin: auto; background: white; border-radius: 16px; padding: 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
+                <h2 style="color: #10B981;">🔐 Recuperación de contraseña</h2>
+                <p>Has solicitado restablecer tu contraseña en <strong>TodoApp</strong>.</p>
+                <p>Usa el siguiente código en la app:</p>
+                <div style="background: #f0fdf4; border-radius: 12px; padding: 20px; text-align: center; margin: 20px 0;">
+                    <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #059669;">{code}</span>
+                </div>
+                <p style="color: #6b7280; font-size: 14px;">Este código expira en <strong>15 minutos</strong>.</p>
+                <p style="color: #6b7280; font-size: 14px;">Si no solicitaste este cambio, ignora este mensaje.</p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        await email_service.send_email(
+            to_email=request.email,
+            subject="🔐 Código de recuperación - TodoApp",
+            body=f"Tu código de recuperación es: {code}\n\nEste código expira en 15 minutos.",
+            html_body=html_content
+        )
+        
+        logger.info(f"✅ Código OTP enviado a {request.email}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error enviando email OTP: {e}")
+        # Limpiar código si falló el envío
+        reset_otp_storage.pop(request.email, None)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al enviar el código. Intenta nuevamente."
+        )
+    
+    return ForgotPasswordResponse(
+        message="Si el email existe en nuestro sistema, recibirás un código de verificación."
+    )
+
+
+@router.post("/reset-password-otp", response_model=ResetPasswordResponse)
+async def reset_password_otp(request: ResetPasswordOtpVerifyRequest):
+    """
+    ✅ NUEVO: Verifica código OTP y cambia la contraseña.
+    """
+    logger.info(f"🔐 Verificando código OTP para reset: {request.email}")
+    
+    # Verificar código
+    stored = reset_otp_storage.get(request.email)
+    
+    if not stored:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se encontró una solicitud de código. Solicita uno nuevo."
+        )
+    
+    if datetime.now() > stored["expires_at"]:
+        del reset_otp_storage[request.email]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El código ha expirado. Solicita uno nuevo."
+        )
+    
+    if stored["attempts"] >= 5:
+        del reset_otp_storage[request.email]
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Demasiados intentos. Solicita un nuevo código."
+        )
+    
+    if stored["code"] != request.code:
+        stored["attempts"] += 1
+        remaining = 5 - stored["attempts"]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Código incorrecto. Te quedan {remaining} intentos."
+        )
+    
+    # Código correcto - limpiar
+    del reset_otp_storage[request.email]
+    
+    # Cambiar contraseña usando Supabase Admin API
+    try:
+        admin_client = supabase_auth.get_admin_client()
+        
+        # Buscar el ID del usuario por email
+        users_response = admin_client.auth.admin.list_users()
+        user_id = None
+        for user in users_response.users:
+            if user.email == request.email:
+                user_id = user.id
+                break
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Usuario no encontrado."
+            )
+        
+        # Actualizar contraseña
+        admin_client.auth.admin.update_user_by_id(
+            user_id,
+            {"password": request.new_password}
+        )
+        
+        logger.info(f"✅ Contraseña actualizada para usuario: {user_id}")
+        
+        return ResetPasswordResponse(
+            message="Contraseña actualizada exitosamente."
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error cambiando contraseña: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al cambiar contraseña: {str(e)}"
         )
 
 # ============================================

@@ -788,3 +788,111 @@ __all__ = [
     "TwoFactorDisableRequest",
     "TwoFactorStatusResponse",
 ]
+
+# ============================================
+# ✅ NUEVO: RESET DE CONTRASEÑA POR CÓDIGO OTP
+# ============================================
+
+class ResetPasswordOtpRequest(BaseModel):
+    """Solicitud para reset de contraseña con código OTP"""
+    email: EmailStr = Field(..., description="Email del usuario")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "email": "usuario@ejemplo.com"
+            }
+        }
+    )
+
+class ResetPasswordOtpVerifyRequest(BaseModel):
+    """Verifica código OTP y cambia contraseña"""
+    email: EmailStr = Field(..., description="Email del usuario")
+    code: str = Field(..., min_length=6, max_length=6, pattern="^[0-9]{6}$", description="Código de 6 dígitos")
+    new_password: str = Field(..., min_length=8, description="Nueva contraseña")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "email": "usuario@ejemplo.com",
+                "code": "123456",
+                "new_password": "NuevaPass123!"
+            }
+        }
+    )
+
+class ResetPasswordOtpResponse(BaseModel):
+    """Respuesta del reset de contraseña"""
+    message: str
+    success: bool = True
+
+
+# ============================================
+# EXPORTAR TODOS LOS MODELOS
+# ============================================
+
+__all__ = [
+    # Autenticación
+    "ForgotPasswordRequest",
+    "ResetPasswordRequest",
+    "LoginRequest",
+    "RefreshTokenRequest",
+    "RegisterRequest",
+    "RegisterResponse",
+    "LoginResponse",
+    "RefreshTokenResponse",
+    "ForgotPasswordResponse",
+    "ResetPasswordResponse",
+    "LogoutResponse",
+    "ChangePasswordRequest",
+    "ChangePasswordResponse",
+    "DebugCheckResponse",
+    # Token
+    "TokenResponse",
+    "UserInfoResponse",
+    "PasswordResetToken",
+    "VerifyTokenResponse",
+    # Respuestas estándar
+    "StandardResponse",
+    "ErrorResponse",
+    "HealthResponse",
+    # Perfil de usuario
+    "ProfileUpdateRequest",
+    "ProfileResponse",
+    "UserResponse",
+    # Tareas
+    "TaskBase",
+    "TaskCreate",
+    "TaskUpdate",
+    "Task",
+    "TaskStats",
+    # WebAuthn / Passkeys
+    "WebAuthnRegistrationBeginRequest",
+    "WebAuthnRegistrationBeginResponse",
+    "WebAuthnRegistrationCompleteRequest",
+    "WebAuthnRegistrationCompleteResponse",
+    "WebAuthnLoginBeginRequest",
+    "WebAuthnLoginBeginResponse",
+    "WebAuthnLoginCompleteRequest",
+    "WebAuthnLoginCompleteResponse",
+    "WebAuthnCredentialResponse",
+    "WebAuthnDeleteRequest",
+    # OTP
+    "OtpSendRequest",
+    "OtpSendResponse",
+    "OtpVerifyRequest",
+    "OtpVerifyResponse",
+    # 2FA (TOTP)
+    "TwoFactorSetupRequest",
+    "TwoFactorSetupResponse",
+    "TwoFactorEnableRequest",
+    "TwoFactorEnableResponse",
+    "TwoFactorVerifyRequest",
+    "TwoFactorVerifyResponse",
+    "TwoFactorDisableRequest",
+    "TwoFactorStatusResponse",
+    # ✅ NUEVOS: Reset de contraseña por código OTP
+    "ResetPasswordOtpRequest",
+    "ResetPasswordOtpVerifyRequest",
+    "ResetPasswordOtpResponse",
+]
