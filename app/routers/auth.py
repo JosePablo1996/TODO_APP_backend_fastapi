@@ -664,13 +664,15 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
         return ForgotPasswordResponse(
             message="Si el email existe en nuestro sistema, recibirás instrucciones para restablecer tu contraseña."
         )
-        
+
+
 # ============================================
 # ✅ NUEVO: RESET DE CONTRASEÑA POR CÓDIGO OTP
 # ============================================
 
 # Almacenamiento temporal para códigos de reset
 reset_otp_storage: Dict[str, dict] = {}
+
 
 @router.post("/forgot-password-otp", response_model=ForgotPasswordResponse)
 async def forgot_password_otp(request: ForgotPasswordRequest):
@@ -686,25 +688,46 @@ async def forgot_password_otp(request: ForgotPasswordRequest):
             detail="Servicio de autenticación no disponible"
         )
     
-    # Verificar que el email existe en Supabase
+    # ✅ CORREGIDO: Buscar usuario por email (usa get_user_by_email)
+    user_exists = False
+    user_name = request.email.split('@')[0]
+    
     try:
         admin_client = supabase_auth.get_admin_client()
-        users_response = admin_client.auth.admin.list_users()
-        user_exists = False
-        if users_response and hasattr(users_response, 'users') and users_response.users:
-            for user in users_response.users:
-                if user.email == request.email:
-                    user_exists = True
-                    break
         
-        if not user_exists:
-            # Por seguridad, no revelar si el email existe o no
-            logger.info(f"📧 Email no encontrado: {request.email}")
-            return ForgotPasswordResponse(
-                message="Si el email existe en nuestro sistema, recibirás un código de verificación."
-            )
+        # Método 1: Buscar por email directamente (más confiable)
+        try:
+            user_response = admin_client.auth.admin.get_user_by_email(request.email)
+            if user_response and hasattr(user_response, 'user') and user_response.user:
+                user_exists = True
+                user_metadata = user_response.user.user_metadata or {}
+                user_name = user_metadata.get("full_name") or user_metadata.get("username") or request.email.split('@')[0]
+                logger.info(f"✅ Usuario encontrado por email: {request.email}")
+        except Exception as e:
+            logger.warning(f"⚠️ get_user_by_email falló: {e}")
+            # Método 2: Fallback - listar todos los usuarios
+            try:
+                users_response = admin_client.auth.admin.list_users()
+                if users_response and hasattr(users_response, 'users') and users_response.users:
+                    for user in users_response.users:
+                        if user.email == request.email:
+                            user_exists = True
+                            user_metadata = user.user_metadata or {}
+                            user_name = user_metadata.get("full_name") or user_metadata.get("username") or request.email.split('@')[0]
+                            logger.info(f"✅ Usuario encontrado en lista: {request.email}")
+                            break
+            except Exception as e2:
+                logger.error(f"❌ Error listando usuarios: {e2}")
+    
     except Exception as e:
-        logger.warning(f"⚠️ Error verificando email: {e}")
+        logger.error(f"❌ Error verificando email: {e}")
+    
+    if not user_exists:
+        logger.info(f"📧 Email no encontrado: {request.email}")
+        # Por seguridad, no revelar si el email existe o no
+        return ForgotPasswordResponse(
+            message="Si el email existe en nuestro sistema, recibirás un código de verificación."
+        )
     
     # Generar código de 6 dígitos
     code = ''.join(random.choices(string.digits, k=6))
@@ -716,36 +739,53 @@ async def forgot_password_otp(request: ForgotPasswordRequest):
         "attempts": 0
     }
     
+    logger.info(f"🔢 Código generado para {request.email}: {code}")
+    
     # Enviar email con el código
     try:
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head><meta charset="UTF-8"></head>
-        <body style="font-family: Arial, sans-serif; padding: 20px;">
+        <body style="font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5;">
             <div style="max-width: 500px; margin: auto; background: white; border-radius: 16px; padding: 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
-                <h2 style="color: #10B981;">🔐 Recuperación de contraseña</h2>
-                <p>Has solicitado restablecer tu contraseña en <strong>TodoApp</strong>.</p>
-                <p>Usa el siguiente código en la app:</p>
-                <div style="background: #f0fdf4; border-radius: 12px; padding: 20px; text-align: center; margin: 20px 0;">
-                    <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #059669;">{code}</span>
+                <div style="text-align: center; margin-bottom: 24px;">
+                    <h1 style="color: #10B981; margin: 0;">🔐 TodoApp</h1>
                 </div>
-                <p style="color: #6b7280; font-size: 14px;">Este código expira en <strong>15 minutos</strong>.</p>
-                <p style="color: #6b7280; font-size: 14px;">Si no solicitaste este cambio, ignora este mensaje.</p>
+                <h2 style="color: #1f2937;">Recuperación de contraseña</h2>
+                <p style="color: #4b5563;">Hola <strong>{user_name}</strong>,</p>
+                <p style="color: #4b5563;">Has solicitado restablecer tu contraseña. Usa el siguiente código en la app:</p>
+                <div style="background: #f0fdf4; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0; border: 2px dashed #10B981;">
+                    <span style="font-size: 40px; font-weight: bold; letter-spacing: 10px; color: #059669; font-family: 'Courier New', monospace;">{code}</span>
+                </div>
+                <p style="color: #6b7280; font-size: 14px;">⏰ Este código expira en <strong>15 minutos</strong>.</p>
+                <p style="color: #6b7280; font-size: 14px;">🔒 Si no solicitaste este cambio, ignora este mensaje.</p>
+                <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">
+                <p style="color: #9ca3af; font-size: 12px; text-align: center;">© 2026 TodoApp. Todos los derechos reservados.</p>
             </div>
         </body>
         </html>
         """
         
-        await email_service.send_email(
+        email_sent = await email_service.send_email(
             to_email=request.email,
             subject="🔐 Código de recuperación - TodoApp",
-            body=f"Tu código de recuperación es: {code}\n\nEste código expira en 15 minutos.",
+            body=f"Hola {user_name},\n\nTu código de recuperación es: {code}\n\nEste código expira en 15 minutos.\n\nSi no solicitaste este cambio, ignora este mensaje.",
             html_body=html_content
         )
         
-        logger.info(f"✅ Código OTP enviado a {request.email}")
+        if email_sent:
+            logger.info(f"✅ Código OTP enviado a {request.email}")
+        else:
+            logger.error(f"❌ Email service retornó False para {request.email}")
+            reset_otp_storage.pop(request.email, None)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Error al enviar el código. Intenta nuevamente."
+            )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Error enviando email OTP: {e}")
         # Limpiar código si falló el envío
@@ -801,17 +841,30 @@ async def reset_password_otp(request: ResetPasswordOtpVerifyRequest):
     # Código correcto - limpiar
     del reset_otp_storage[request.email]
     
-    # Cambiar contraseña usando Supabase Admin API
+    # ✅ CORREGIDO: Buscar usuario por email (usa get_user_by_email)
     try:
         admin_client = supabase_auth.get_admin_client()
-        
-        # Buscar el ID del usuario por email
-        users_response = admin_client.auth.admin.list_users()
         user_id = None
-        for user in users_response.users:
-            if user.email == request.email:
-                user_id = user.id
-                break
+        
+        # Método 1: Buscar por email directamente
+        try:
+            user_response = admin_client.auth.admin.get_user_by_email(request.email)
+            if user_response and hasattr(user_response, 'user') and user_response.user:
+                user_id = user_response.user.id
+                logger.info(f"✅ Usuario encontrado por email: {request.email} (ID: {user_id})")
+        except Exception as e:
+            logger.warning(f"⚠️ get_user_by_email falló: {e}")
+            # Método 2: Fallback - listar usuarios
+            try:
+                users_response = admin_client.auth.admin.list_users()
+                if users_response and hasattr(users_response, 'users') and users_response.users:
+                    for user in users_response.users:
+                        if user.email == request.email:
+                            user_id = user.id
+                            logger.info(f"✅ Usuario encontrado en lista: {request.email} (ID: {user_id})")
+                            break
+            except Exception as e2:
+                logger.error(f"❌ Error listando usuarios: {e2}")
         
         if not user_id:
             raise HTTPException(
