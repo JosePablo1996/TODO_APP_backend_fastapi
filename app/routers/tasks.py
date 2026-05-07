@@ -40,12 +40,18 @@ class TaskUpdate(BaseModel):
     category: Optional[str] = Field(None, max_length=50)
     tags: Optional[List[str]] = None
     color: Optional[str] = Field(None, description="Color de la tarea en formato hex")
+    deleted_at: Optional[str] = Field(None, description="Fecha de eliminación (soft delete)")
+    is_favorite: Optional[bool] = Field(None, description="Marcar como favorita")
+    is_archived: Optional[bool] = Field(None, description="Marcar como archivada")
 
 class Task(TaskBase):
     """Modelo de respuesta de tarea"""
     id: str
     user_id: str
     color: Optional[str] = Field(None, description="Color de la tarea")
+    is_favorite: Optional[bool] = Field(False, description="Tarea favorita")
+    is_archived: Optional[bool] = Field(False, description="Tarea archivada")
+    deleted_at: Optional[str] = Field(None, description="Fecha de eliminación (soft delete)")
     created_at: str
     updated_at: Optional[str] = None
 
@@ -59,6 +65,10 @@ class TaskStats(BaseModel):
     by_category: Dict[str, int]
     due_today: int
     overdue: int
+
+class BulkDeleteRequest(BaseModel):
+    """Modelo para eliminación masiva"""
+    task_ids: List[str] = Field(..., min_items=1, description="Lista de IDs de tareas a eliminar")
 
 
 # ============================================
@@ -119,6 +129,9 @@ def _task_to_response(task_data: Dict[str, Any]) -> Task:
         category=task_data.get("category"),
         tags=task_data.get("tags", []),
         color=task_data.get("color"),
+        is_favorite=task_data.get("is_favorite", False),
+        is_archived=task_data.get("is_archived", False),
+        deleted_at=task_data.get("deleted_at"),
         created_at=task_data["created_at"],
         updated_at=task_data.get("updated_at")
     )
@@ -135,11 +148,14 @@ async def get_tasks(
     priority: Optional[str] = Query(None, description="Filtrar por prioridad"),
     category: Optional[str] = Query(None, description="Filtrar por categoría"),
     search: Optional[str] = Query(None, description="Buscar en título o descripción"),
+    include_deleted: Optional[bool] = Query(False, description="Incluir tareas en papelera"),
     limit: int = Query(50, ge=1, le=100, description="Límite de resultados"),
     offset: int = Query(0, ge=0, description="Desplazamiento para paginación")
 ):
     """
-    Obtiene todas las tareas del usuario actual con filtros opcionales
+    Obtiene todas las tareas del usuario actual con filtros opcionales.
+    Por defecto NO incluye tareas eliminadas (soft delete).
+    Usa include_deleted=true para obtener también las de la papelera.
     """
     user_id = current_user.get("sub")
     logger.info(f"📋 Obteniendo tareas para usuario {user_id}")
@@ -151,8 +167,12 @@ async def get_tasks(
         
         tasks_table = get_tasks_table()
         
-        # Construir consulta
+        # Construir consulta base
         query = tasks_table.select("*").eq("user_id", user_id)
+        
+        # ✅ SOFT DELETE: Excluir tareas eliminadas por defecto
+        if not include_deleted:
+            query = query.is_("deleted_at", "null")
         
         # Aplicar filtros
         if completed is not None:
@@ -178,7 +198,8 @@ async def get_tasks(
         
         tasks = [_task_to_response(task) for task in response.data]
         
-        logger.info(f"✅ {len(tasks)} tareas encontradas")
+        deleted_count = sum(1 for t in tasks if t.deleted_at is not None)
+        logger.info(f"✅ {len(tasks)} tareas encontradas ({deleted_count} en papelera)")
         return tasks
         
     except HTTPException:
@@ -188,6 +209,46 @@ async def get_tasks(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al obtener tareas: {str(e)}"
+        )
+
+
+@router.get("/trash", response_model=List[Task])
+async def get_trash_tasks(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=100, description="Límite de resultados"),
+    offset: int = Query(0, ge=0, description="Desplazamiento para paginación")
+):
+    """
+    Obtiene las tareas en la papelera (soft deleted) del usuario actual
+    """
+    user_id = current_user.get("sub")
+    logger.info(f"🗑️📋 Obteniendo papelera para usuario {user_id}")
+    
+    try:
+        if not ensure_tasks_table_exists():
+            return []
+        
+        tasks_table = get_tasks_table()
+        
+        # Solo tareas con deleted_at no nulo
+        query = tasks_table.select("*").eq("user_id", user_id).not_.is_("deleted_at", "null")
+        query = query.order("deleted_at", desc=True)
+        query = query.range(offset, offset + limit - 1)
+        
+        response = query.execute()
+        
+        tasks = [_task_to_response(task) for task in response.data]
+        
+        logger.info(f"✅ {len(tasks)} tareas en papelera")
+        return tasks
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error obteniendo papelera: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener papelera: {str(e)}"
         )
 
 
@@ -222,6 +283,9 @@ async def create_task(
             "category": task.category,
             "tags": task.tags or [],
             "color": task.color,
+            "is_favorite": False,
+            "is_archived": False,
+            "deleted_at": None,
             "created_at": now,
             "updated_at": now
         }
@@ -328,10 +392,16 @@ async def update_task(
             update_data["tags"] = task_update.tags
         if task_update.color is not None:
             update_data["color"] = task_update.color
+        if task_update.is_favorite is not None:
+            update_data["is_favorite"] = task_update.is_favorite
+        if task_update.is_archived is not None:
+            update_data["is_archived"] = task_update.is_archived
+        if task_update.deleted_at is not None:
+            update_data["deleted_at"] = task_update.deleted_at
         
         update_data["updated_at"] = datetime.now().isoformat()
         
-        if not update_data:
+        if len(update_data) <= 1:  # Solo updated_at
             task_data = check_response.data[0]
             return _task_to_response(task_data)
         
@@ -361,13 +431,16 @@ async def update_task(
 @router.delete("/{task_id}")
 async def delete_task(
     task_id: str,
+    permanent: Optional[bool] = Query(False, description="Eliminar permanentemente"),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Elimina una tarea
+    Elimina una tarea (soft delete por defecto, permanent=true para eliminación física)
+    
+    - **Soft delete** (permanent=false): Marca deleted_at y mueve a papelera
+    - **Permanent delete** (permanent=true): Elimina físicamente de la base de datos
     """
     user_id = current_user.get("sub")
-    logger.info(f"🗑️ Eliminando tarea {task_id} para usuario {user_id}")
     
     try:
         tasks_table = get_tasks_table()
@@ -381,16 +454,38 @@ async def delete_task(
                 detail="Tarea no encontrada"
             )
         
-        # ✅ Eliminar SIN await
-        tasks_table.delete().eq("id", task_id).execute()
-        
-        logger.info(f"✅ Tarea eliminada: {task_id}")
-        
-        return {
-            "message": f"Tarea eliminada correctamente",
-            "task_id": task_id,
-            "success": True
-        }
+        if permanent:
+            # ✅ ELIMINACIÓN PERMANENTE (borrado físico)
+            logger.info(f"🗑️💀 Eliminando PERMANENTEMENTE tarea {task_id}")
+            tasks_table.delete().eq("id", task_id).execute()
+            
+            logger.info(f"✅ Tarea eliminada permanentemente: {task_id}")
+            
+            return {
+                "message": "Tarea eliminada permanentemente",
+                "task_id": task_id,
+                "success": True,
+                "permanent": True
+            }
+        else:
+            # ✅ SOFT DELETE (mover a papelera)
+            logger.info(f"📦 Moviendo tarea {task_id} a papelera (soft delete)")
+            
+            now = datetime.now().isoformat()
+            tasks_table.update({
+                "deleted_at": now,
+                "updated_at": now
+            }).eq("id", task_id).execute()
+            
+            logger.info(f"✅ Tarea movida a papelera: {task_id}")
+            
+            return {
+                "message": "Tarea movida a la papelera",
+                "task_id": task_id,
+                "deleted_at": now,
+                "success": True,
+                "permanent": False
+            }
         
     except HTTPException:
         raise
@@ -402,12 +497,178 @@ async def delete_task(
         )
 
 
+@router.post("/{task_id}/restore", response_model=Task)
+async def restore_task(
+    task_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Restaura una tarea de la papelera (quita deleted_at)
+    """
+    user_id = current_user.get("sub")
+    logger.info(f"🔄 Restaurando tarea {task_id} de papelera")
+    
+    try:
+        tasks_table = get_tasks_table()
+        
+        # Verificar que la tarea existe
+        check_response = tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
+        
+        if not check_response.data or len(check_response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tarea no encontrada"
+            )
+        
+        # Quitar deleted_at
+        now = datetime.now().isoformat()
+        response = tasks_table.update({
+            "deleted_at": None,
+            "updated_at": now
+        }).eq("id", task_id).execute()
+        
+        logger.info(f"✅ Tarea restaurada: {task_id}")
+        
+        return _task_to_response(response.data[0])
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error restaurando tarea: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al restaurar tarea: {str(e)}"
+        )
+
+
+@router.post("/bulk/delete")
+async def bulk_delete_tasks(
+    request: BulkDeleteRequest,
+    permanent: Optional[bool] = Query(False, description="Eliminar permanentemente"),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Elimina múltiples tareas (soft delete por defecto)
+    """
+    user_id = current_user.get("sub")
+    task_ids = request.task_ids
+    logger.info(f"📦 Eliminando {len(task_ids)} tareas en bulk (permanent={permanent})")
+    
+    try:
+        tasks_table = get_tasks_table()
+        success_count = 0
+        failed_count = 0
+        failed_ids = []
+        
+        for task_id in task_ids:
+            try:
+                # Verificar propiedad
+                check_response = tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
+                
+                if not check_response.data or len(check_response.data) == 0:
+                    failed_count += 1
+                    failed_ids.append(task_id)
+                    continue
+                
+                if permanent:
+                    tasks_table.delete().eq("id", task_id).execute()
+                else:
+                    now = datetime.now().isoformat()
+                    tasks_table.update({
+                        "deleted_at": now,
+                        "updated_at": now
+                    }).eq("id", task_id).execute()
+                
+                success_count += 1
+                
+            except Exception as e:
+                logger.error(f"Error en bulk delete para {task_id}: {str(e)}")
+                failed_count += 1
+                failed_ids.append(task_id)
+        
+        logger.info(f"✅ Bulk delete: {success_count} éxito, {failed_count} fallos")
+        
+        return {
+            "message": f"Eliminadas {success_count} de {len(task_ids)} tareas",
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "failed_ids": failed_ids,
+            "permanent": permanent,
+            "success": failed_count == 0
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en bulk delete: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en eliminación masiva: {str(e)}"
+        )
+
+
+@router.post("/bulk/restore")
+async def bulk_restore_tasks(
+    request: BulkDeleteRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Restaura múltiples tareas de la papelera
+    """
+    user_id = current_user.get("sub")
+    task_ids = request.task_ids
+    logger.info(f"🔄 Restaurando {len(task_ids)} tareas en bulk")
+    
+    try:
+        tasks_table = get_tasks_table()
+        success_count = 0
+        failed_count = 0
+        
+        for task_id in task_ids:
+            try:
+                check_response = tasks_table.select("*").eq("id", task_id).eq("user_id", user_id).execute()
+                
+                if not check_response.data or len(check_response.data) == 0:
+                    failed_count += 1
+                    continue
+                
+                now = datetime.now().isoformat()
+                tasks_table.update({
+                    "deleted_at": None,
+                    "updated_at": now
+                }).eq("id", task_id).execute()
+                
+                success_count += 1
+                
+            except Exception as e:
+                logger.error(f"Error en bulk restore para {task_id}: {str(e)}")
+                failed_count += 1
+        
+        logger.info(f"✅ Bulk restore: {success_count} éxito, {failed_count} fallos")
+        
+        return {
+            "message": f"Restauradas {success_count} de {len(task_ids)} tareas",
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "success": failed_count == 0
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en bulk restore: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error en restauración masiva: {str(e)}"
+        )
+
+
 @router.get("/stats/summary", response_model=TaskStats)
 async def get_task_stats(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Obtiene estadísticas de tareas del usuario
+    Obtiene estadísticas de tareas del usuario (solo activas, no eliminadas)
     """
     user_id = current_user.get("sub")
     logger.info(f"📊 Obteniendo estadísticas para usuario {user_id}")
@@ -415,8 +676,8 @@ async def get_task_stats(
     try:
         tasks_table = get_tasks_table()
         
-        # ✅ Ejecutar SIN await
-        response = tasks_table.select("*").eq("user_id", user_id).execute()
+        # ✅ Solo tareas activas (no eliminadas)
+        response = tasks_table.select("*").eq("user_id", user_id).is_("deleted_at", "null").execute()
         
         tasks = response.data
         
@@ -544,26 +805,30 @@ async def clear_completed_tasks(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Elimina todas las tareas completadas del usuario
+    Elimina todas las tareas completadas del usuario (soft delete)
     """
     user_id = current_user.get("sub")
-    logger.info(f"🧹 Eliminando tareas completadas para usuario {user_id}")
+    logger.info(f"🧹 Moviendo tareas completadas a papelera para usuario {user_id}")
     
     try:
         tasks_table = get_tasks_table()
         
         # ✅ Contar SIN await
-        count_response = tasks_table.select("*", count="exact").eq("user_id", user_id).eq("completed", True).execute()
+        count_response = tasks_table.select("*", count="exact").eq("user_id", user_id).eq("completed", True).is_("deleted_at", "null").execute()
         
         completed_count = count_response.count if hasattr(count_response, 'count') else 0
         
-        # ✅ Eliminar SIN await
-        tasks_table.delete().eq("user_id", user_id).eq("completed", True).execute()
+        # ✅ Soft delete en lugar de eliminar físicamente
+        now = datetime.now().isoformat()
+        tasks_table.update({
+            "deleted_at": now,
+            "updated_at": now
+        }).eq("user_id", user_id).eq("completed", True).is_("deleted_at", "null").execute()
         
-        logger.info(f"✅ {completed_count} tareas completadas eliminadas")
+        logger.info(f"✅ {completed_count} tareas completadas movidas a papelera")
         
         return {
-            "message": f"Se eliminaron {completed_count} tareas completadas",
+            "message": f"Se movieron {completed_count} tareas completadas a la papelera",
             "deleted_count": completed_count,
             "success": True
         }
