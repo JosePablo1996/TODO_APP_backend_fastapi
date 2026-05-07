@@ -96,23 +96,36 @@ app = FastAPI(
 # CONFIGURACIÓN CORS
 # ============================================
 
-# Asegurar que ALLOWED_ORIGINS incluya localhost:5173
-cors_origins = settings.ALLOWED_ORIGINS
+# Asegurar que ALLOWED_ORIGINS incluya todas las URLs necesarias
+cors_origins = settings.ALLOWED_ORIGINS.copy() if settings.ALLOWED_ORIGINS else []
 
-# Verificar y agregar localhost:5173 si no está presente
-if "http://localhost:5173" not in cors_origins:
-    cors_origins.append("http://localhost:5173")
-    logger.info("✅ Agregado http://localhost:5173 a CORS origins")
+# URLs de desarrollo local
+local_urls = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "http://127.0.0.1:3000",
+]
 
-if "http://localhost:3000" not in cors_origins:
-    cors_origins.append("http://localhost:3000")
-    logger.info("✅ Agregado http://localhost:3000 a CORS origins")
+# URLs de producción
+production_urls = [
+    "https://todoapp-manager.onrender.com",      # Frontend en Render
+    "https://todo-app-backend-fastapi-klh2.onrender.com",  # Backend en Render
+]
 
-# Agregar URL de producción de Render si no está presente
-render_url = "https://todo-app-backend-fastapi-klh2.onrender.com"
-if render_url not in cors_origins and "*" not in cors_origins:
-    cors_origins.append(render_url)
-    logger.info(f"✅ Agregado {render_url} a CORS origins")
+# Agregar URLs locales si no están presentes
+for url in local_urls:
+    if url not in cors_origins:
+        cors_origins.append(url)
+        logger.info(f"✅ Agregado {url} a CORS origins (local)")
+
+# Agregar URLs de producción si no están presentes
+for url in production_urls:
+    if url not in cors_origins:
+        cors_origins.append(url)
+        logger.info(f"✅ Agregado {url} a CORS origins (producción)")
 
 # Configurar CORS con todas las opciones necesarias para WebAuthn
 app.add_middleware(
@@ -127,7 +140,8 @@ app.add_middleware(
         "Origin",
         "X-Requested-With",
         "X-Session-ID",
-        "X-CSRF-Token"
+        "X-CSRF-Token",
+        "X-Process-Time",
     ],
     expose_headers=["X-Process-Time"],
     max_age=86400,  # 24 horas de caché para preflight requests
@@ -263,7 +277,7 @@ logger.info("   - webauthn: Passkeys / WebAuthn")
 # ============================================
 
 @app.get("/", tags=["root"])
-@app.head("/", tags=["root"])  # ✅ CORREGIDO: Aceptar HEAD para health checks de Render
+@app.head("/", tags=["root"])
 async def root():
     return {
         "message": f"Bienvenido a {settings.API_TITLE}",
@@ -286,7 +300,7 @@ async def root():
 
 
 @app.get("/api/health", tags=["health"])
-@app.head("/api/health", tags=["health"])  # ✅ CORREGIDO: Aceptar HEAD para health checks
+@app.head("/api/health", tags=["health"])
 async def health_check():
     """Health check de la API"""
     import httpx
