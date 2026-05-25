@@ -8,7 +8,8 @@ from app.routers import users
 from app.routers import storage
 from app.routers import tasks
 from app.routers import debug
-from app.routers import webauthn  # <-- Agregar esto
+from app.routers import webauthn
+from app.routers import backup
 
 __all__ = [
     "auth",
@@ -16,5 +17,6 @@ __all__ = [
     "storage",
     "tasks",
     "debug",
-    "webauthn",  # <-- Agregar esto
+    "webauthn",
+    "backup",
 ]

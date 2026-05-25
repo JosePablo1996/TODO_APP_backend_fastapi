@@ -61,7 +61,7 @@ class SupabaseAuthService:
         except Exception as e:
             error_msg = str(e)
             if "PGRST205" in error_msg:
-                logger.debug("ℹ️ Tabla public.user_passkeys no encontrada")
+                logger.debug("ℹ️ Tabla public.user_passkeys aún no creada")
             else:
                 logger.warning(f"⚠️ Error verificando tabla user_passkeys: {error_msg[:100]}")
             return False
@@ -451,6 +451,59 @@ class SupabaseAuthService:
         except Exception as e:
             logger.error(f"❌ Error verificando token_version: {e}")
             return True
+
+    # ============================================
+    # ✅ NUEVOS MÉTODOS PARA METADATA (FASE 1)
+    # ============================================
+
+    async def get_user_metadata(self, user_id: str) -> Dict[str, Any]:
+        """
+        Obtiene metadata de un usuario desde la tabla profiles.
+        """
+        try:
+            admin_client = self.get_admin_client()
+            result = admin_client.table("profiles").select("*").eq("id", user_id).execute()
+            
+            if result.data and len(result.data) > 0:
+                return result.data[0]
+            
+            # Fallback: obtener de auth.users
+            user_data = await self.get_user_by_id(user_id)
+            if user_data:
+                return user_data.get("user_metadata", {})
+            
+            return {}
+        except Exception as e:
+            logger.error(f"❌ Error obteniendo metadata para {user_id}: {e}")
+            return {}
+
+    async def update_user_metadata(self, user_id: str, metadata: Dict[str, Any]) -> bool:
+        """
+        Actualiza metadata de un usuario en la tabla profiles.
+        """
+        try:
+            admin_client = self.get_admin_client()
+            
+            # Verificar si el perfil existe
+            existing = admin_client.table("profiles").select("*").eq("id", user_id).execute()
+            
+            now = datetime.now().isoformat()
+            
+            if existing.data and len(existing.data) > 0:
+                # Actualizar existente
+                admin_client.table("profiles").update(metadata).eq("id", user_id).execute()
+                logger.info(f"✅ Metadata actualizada en profiles para usuario {user_id}: {list(metadata.keys())}")
+            else:
+                # Crear nuevo perfil
+                insert_data = {"id": user_id, **metadata, "created_at": now}
+                admin_client.table("profiles").insert(insert_data).execute()
+                logger.info(f"✅ Nuevo perfil creado para usuario {user_id}: {list(metadata.keys())}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error actualizando metadata para {user_id}: {e}")
+            return False
 
     def is_available(self) -> bool:
         available = self.is_configured and self._client is not None

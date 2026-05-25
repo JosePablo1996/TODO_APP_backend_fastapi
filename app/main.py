@@ -15,7 +15,7 @@ import os
 
 from app.config import settings
 from app.models import HealthResponse
-from app.routers import auth, users, storage, tasks, debug, webauthn
+from app.routers import auth, users, storage, tasks, debug, webauthn, backup
 from app.utils.helpers import get_client_ip
 
 # ============================================
@@ -67,11 +67,21 @@ async def lifespan(app: FastAPI):
     else:
         print("⚠️ SMTP: NO CONFIGURADO (emails personalizados no funcionarán)")
     
+    # Mostrar configuración de seguridad (FASE 1, 2 y 3)
+    print("-" * 60)
+    print("🔐 CONFIGURACIÓN DE SEGURIDAD")
+    print(f"   Max login attempts: {settings.MAX_LOGIN_ATTEMPTS}")
+    print(f"   Lockout duration: {settings.LOGIN_LOCKOUT_MINUTES} minutos")
+    print(f"   Password max age: {settings.PASSWORD_MAX_AGE_DAYS} días")
+    print(f"   Password reuse prevention: últimas {settings.PASSWORD_PREVENT_REUSE_COUNT} veces")
+    print(f"   Advertencias expiración: {'✅' if settings.should_send_password_expiry_warnings else '❌'}")
+    print(f"   Cloud Backup: ✅ ACTIVADO (límite 20 backups por usuario)")
+    
     # Mostrar configuración CORS
     print(f"🌍 CORS Origins permitidos: {settings.ALLOWED_ORIGINS}")
     
     # Listar routers disponibles
-    routers_disponibles = ["auth", "users", "storage", "tasks", "debug", "webauthn"]
+    routers_disponibles = ["auth", "users", "storage", "tasks", "debug", "webauthn", "backup"]
     print(f"📡 Routers cargados: {', '.join(routers_disponibles)}")
     print("=" * 60)
     
@@ -262,6 +272,7 @@ app.include_router(storage.router)
 app.include_router(tasks.router)
 app.include_router(debug.router)
 app.include_router(webauthn.router)
+app.include_router(backup.router)
 
 logger.info("✅ Todos los routers han sido registrados correctamente")
 logger.info("   - auth: Autenticación con Supabase")
@@ -270,6 +281,7 @@ logger.info("   - storage: Almacenamiento de archivos")
 logger.info("   - tasks: Gestión de tareas")
 logger.info("   - debug: Diagnóstico")
 logger.info("   - webauthn: Passkeys / WebAuthn")
+logger.info("   - backup: Backup en la nube (Fase 3)")
 
 
 # ============================================
@@ -293,7 +305,8 @@ async def root():
             "storage": "/api/storage/*",
             "tasks": "/api/tasks/*",
             "debug": "/debug/*",
-            "webauthn": "/api/webauthn/*"
+            "webauthn": "/api/webauthn/*",
+            "backup": "/api/backup/*"
         },
         "timestamp": datetime.now().isoformat()
     }
@@ -358,6 +371,11 @@ async def health_check():
             "smtp": {
                 "configured": settings.validate_smtp_config()
             }
+        },
+        "security": {
+            "max_login_attempts": settings.MAX_LOGIN_ATTEMPTS,
+            "password_max_age_days": settings.PASSWORD_MAX_AGE_DAYS,
+            "cloud_backup_limit": 20
         }
     }
 
@@ -404,7 +422,11 @@ async def api_info():
                 "2fa_enable": "/api/auth/2fa/enable",
                 "2fa_verify": "/api/auth/2fa/verify",
                 "2fa_disable": "/api/auth/2fa/disable",
-                "2fa_status": "/api/auth/2fa/status"
+                "2fa_status": "/api/auth/2fa/status",
+                "password_policy": "/api/auth/password-policy",
+                "check_password_expiry": "/api/auth/check-password-expiry",
+                "login_attempts_status": "/api/auth/login-attempts/status",
+                "change_password": "/api/auth/change-password"
             },
             "users": {
                 "profile": "/api/users/profile",
@@ -419,7 +441,23 @@ async def api_info():
                 "login_complete": "/api/webauthn/login/complete",
                 "list_credentials": "/api/webauthn/credentials",
                 "delete_credential": "/api/webauthn/credentials/{credential_id}"
+            },
+            "backup": {
+                "save": "/api/backup/cloud",
+                "list": "/api/backup/cloud",
+                "get": "/api/backup/cloud/{backup_id}",
+                "delete": "/api/backup/cloud/{backup_id}",
+                "sync": "/api/backup/cloud/sync",
+                "limit_info": "/api/backup/cloud/limit/info",
+                "stats": "/api/backup/cloud/stats"
             }
+        },
+        "security_policies": {
+            "max_login_attempts": settings.MAX_LOGIN_ATTEMPTS,
+            "lockout_minutes": settings.LOGIN_LOCKOUT_MINUTES,
+            "password_max_age_days": settings.PASSWORD_MAX_AGE_DAYS,
+            "password_prevent_reuse": settings.PASSWORD_PREVENT_REUSE_COUNT,
+            "cloud_backup_limit": 20
         },
         "timestamp": datetime.now().isoformat()
     }
@@ -454,7 +492,8 @@ async def debug_welcome():
             "routers": "/api/routers",
             "health": "/api/health",
             "supabase_status": "/api/users/debug/supabase-status",
-            "webauthn_status": "/api/webauthn/credentials"
+            "webauthn_status": "/api/webauthn/credentials",
+            "backup_stats": "/api/backup/cloud/stats"
         }
     }
 

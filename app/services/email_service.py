@@ -2,6 +2,7 @@
 """
 Servicio de email personalizado.
 ✅ Soporta SendGrid API REST (puerto 443/HTTPS) para Render.
+✅ FASE 2: Advertencias de expiración de contraseña.
 """
 import httpx
 from email.mime.text import MIMEText
@@ -189,7 +190,7 @@ class EmailService:
             return False
     
     # ============================================
-    # MÉTODOS EXISTENTES (sin cambios)
+    # MÉTODOS EXISTENTES
     # ============================================
     
     async def send_welcome_email(self, to_email: str, nombre: str = None) -> bool:
@@ -288,6 +289,253 @@ class EmailService:
             return await self.send_email(to_email=to_email, subject="🔑 Recuperación de Contraseña - TodoApp", body="", html_body=html_content)
         except Exception as e:
             logger.error(f"❌ Error enviando email de recuperación: {str(e)}")
+            return False
+    
+    # ============================================
+    # ✅ NUEVO FASE 2: ADVERTENCIA DE EXPIRACIÓN DE CONTRASEÑA
+    # ============================================
+    
+    async def send_password_expiry_warning(self, to_email: str, name: str, days_remaining: int) -> bool:
+        """
+        Envía advertencia de expiración de contraseña por email.
+        ✅ FASE 2: Notificaciones automáticas cuando la contraseña está por expirar.
+        
+        Args:
+            to_email: Email del destinatario
+            name: Nombre del usuario
+            days_remaining: Días restantes para la expiración
+        
+        Returns:
+            True si el email se envió correctamente, False en caso contrario
+        """
+        if not self._configured:
+            logger.warning(f"⚠️ Email no configurado - no se puede enviar advertencia a {to_email}")
+            return False
+        
+        if not settings.should_send_password_expiry_warnings:
+            logger.info(f"📧 Advertencias de expiración desactivadas - no se envía a {to_email}")
+            return False
+        
+        try:
+            subject = f"⚠️ Tu contraseña expirará en {days_remaining} días - TodoApp"
+            
+            # Determinar el mensaje según los días restantes
+            if days_remaining <= 3:
+                urgency_class = "urgent"
+                urgency_color = "#DC2626"
+                urgency_message = "¡ATENCIÓN! Tu contraseña expirará muy pronto."
+            elif days_remaining <= 7:
+                urgency_class = "warning"
+                urgency_color = "#F59E0B"
+                urgency_message = f"Tu contraseña expirará en {days_remaining} días."
+            else:
+                urgency_class = "info"
+                urgency_color = "#3B82F6"
+                urgency_message = f"Recuerda que tu contraseña expirará en {days_remaining} días."
+            
+            html_content = f"""
+            <!DOCTYPE html>
+            <html lang="es">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Advertencia de expiración - TodoApp</title>
+                <style>
+                    body {{
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                        background: #f4f4f4;
+                        padding: 20px;
+                        margin: 0;
+                    }}
+                    .container {{
+                        max-width: 560px;
+                        margin: 0 auto;
+                        background: white;
+                        border-radius: 24px;
+                        overflow: hidden;
+                        box-shadow: 0 20px 35px -10px rgba(0,0,0,0.1);
+                    }}
+                    .header {{
+                        background: linear-gradient(135deg, #F59E0B 0%, #DC2626 100%);
+                        padding: 32px 24px;
+                        text-align: center;
+                    }}
+                    .header h1 {{
+                        color: white;
+                        margin: 0;
+                        font-size: 28px;
+                        font-weight: 700;
+                    }}
+                    .header p {{
+                        color: rgba(255,255,255,0.85);
+                        margin: 8px 0 0;
+                        font-size: 14px;
+                    }}
+                    .content {{
+                        padding: 32px 28px;
+                        text-align: center;
+                    }}
+                    .greeting {{
+                        font-size: 18px;
+                        color: #333;
+                        margin-bottom: 16px;
+                    }}
+                    .days-box {{
+                        background: linear-gradient(135deg, #{'DC2626' if days_remaining <= 3 else 'F59E0B' if days_remaining <= 7 else '3B82F6'}20, #{'DC2626' if days_remaining <= 3 else 'F59E0B' if days_remaining <= 7 else '3B82F6'}10);
+                        border-radius: 20px;
+                        padding: 24px;
+                        margin: 24px 0;
+                        border: 2px solid {urgency_color};
+                    }}
+                    .days-number {{
+                        font-size: 64px;
+                        font-weight: bold;
+                        color: {urgency_color};
+                        line-height: 1;
+                    }}
+                    .days-label {{
+                        font-size: 16px;
+                        color: #666;
+                        margin-top: 8px;
+                    }}
+                    .message {{
+                        font-size: 16px;
+                        color: {urgency_color};
+                        font-weight: 600;
+                        margin-top: 16px;
+                    }}
+                    .button {{
+                        display: inline-block;
+                        background: {urgency_color};
+                        color: white;
+                        padding: 14px 28px;
+                        border-radius: 30px;
+                        text-decoration: none;
+                        font-weight: 600;
+                        margin: 24px 0 16px;
+                        transition: background 0.3s ease;
+                    }}
+                    .button:hover {{
+                        background: {'#B91C1C' if days_remaining <= 3 else '#D97706' if days_remaining <= 7 else '#2563EB'};
+                    }}
+                    .info-box {{
+                        background: #f8f9fa;
+                        border-radius: 12px;
+                        padding: 16px;
+                        margin: 20px 0;
+                        text-align: left;
+                    }}
+                    .info-item {{
+                        margin-bottom: 8px;
+                        font-size: 13px;
+                        color: #555;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                    }}
+                    .info-icon {{
+                        font-size: 18px;
+                    }}
+                    .footer {{
+                        background: #f8f9fa;
+                        padding: 20px;
+                        text-align: center;
+                        color: #999;
+                        font-size: 12px;
+                        border-top: 1px solid #eee;
+                    }}
+                    @media only screen and (max-width: 600px) {{
+                        .days-number {{ font-size: 48px; }}
+                        .content {{ padding: 24px 20px; }}
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>TodoApp</h1>
+                        <p>Advertencia de expiración</p>
+                    </div>
+                    <div class="content">
+                        <div class="greeting">
+                            Hola <strong>{name}</strong>,
+                        </div>
+                        
+                        <div class="days-box">
+                            <div class="days-number">{days_remaining}</div>
+                            <div class="days-label">día{'s' if days_remaining != 1 else ''} restante{'s' if days_remaining != 1 else ''}</div>
+                            <div class="message">{urgency_message}</div>
+                        </div>
+                        
+                        <p style="color: #555; line-height: 1.6;">
+                            Te recomendamos cambiar tu contraseña lo antes posible para mantener la seguridad de tu cuenta.
+                        </p>
+                        
+                        <a href="{settings.FRONTEND_URL}/settings" class="button">
+                            🔐 Cambiar contraseña ahora
+                        </a>
+                        
+                        <div class="info-box">
+                            <div class="info-item">
+                                <span class="info-icon">🔒</span>
+                                <span>Las contraseñas expiran automáticamente por seguridad</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-icon">⏰</span>
+                                <span>Después de la expiración, deberás cambiar tu contraseña para acceder</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-icon">🛡️</span>
+                                <span>Recibirás otra notificación cuando expire</span>
+                            </div>
+                        </div>
+                        
+                        <p style="color: #888; font-size: 13px; margin-top: 20px;">
+                            Si no deseas cambiar tu contraseña ahora, ignora este mensaje.
+                            Tu cuenta seguirá funcionando hasta la fecha de expiración.
+                        </p>
+                    </div>
+                    <div class="footer">
+                        <p>TodoApp - Organiza tu día, alcanza tus metas</p>
+                        <p style="margin-top: 8px;">© 2026 TodoApp. Todos los derechos reservados.</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            text_content = f"""
+TodoApp - Advertencia de expiración de contraseña
+
+Hola {name},
+
+⚠️ Tu contraseña expirará en {days_remaining} día{'s' if days_remaining != 1 else ''}.
+
+{urgency_message}
+
+Para mantener la seguridad de tu cuenta, te recomendamos cambiar tu contraseña lo antes posible.
+
+¿Cómo cambiar tu contraseña?
+1. Inicia sesión en TodoApp
+2. Ve a Configuración > Seguridad
+3. Selecciona "Cambiar contraseña"
+
+Si no deseas cambiar tu contraseña ahora, ignora este mensaje.
+Tu cuenta seguirá funcionando hasta la fecha de expiración.
+
+---
+TodoApp - Organiza tu día, alcanza tus metas
+"""
+            
+            return await self.send_email(
+                to_email=to_email,
+                subject=subject,
+                body=text_content,
+                html_body=html_content
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Error enviando advertencia de expiración a {to_email}: {str(e)}")
             return False
     
     def is_configured(self) -> bool:

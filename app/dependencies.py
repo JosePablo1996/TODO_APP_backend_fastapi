@@ -22,8 +22,10 @@ class AuthService:
     
     async def get_current_user(self, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
         """
-        Valida el token de Supabase y retorna la información del usuario
-        Ahora también valida que la versión del token coincida (invalida sesiones tras cambio de contraseña)
+        Valida el token de Supabase y retorna la información del usuario.
+        Ahora también valida:
+        1. Que la versión del token coincida (invalida sesiones tras cambio de contraseña)
+        2. ✅ NUEVO: Que la contraseña no haya expirado
         """
         # Verificar que Supabase está configurado
         if not settings.is_supabase_configured():
@@ -61,7 +63,7 @@ class AuthService:
             logger.info(f"✅ Token válido para usuario: {user_id}")
             
             # ============================================
-            # NUEVO: VALIDAR TOKEN_VERSION (Cierre de sesiones activas)
+            # VALIDAR TOKEN_VERSION (Cierre de sesiones activas)
             # ============================================
             is_version_valid = await self.supabase_auth.verify_token_version(token, user_id)
             
@@ -74,19 +76,62 @@ class AuthService:
                     headers={"WWW-Authenticate": "Bearer"}
                 )
             
-            # Retornar información del usuario incluyendo token_version
+            # ============================================
+            # ✅ NUEVO: VERIFICAR EXPIRACIÓN DE CONTRASEÑA
+            # ============================================
+            from app.services.security_service import security_service
+            
+            is_expired, days_remaining = await security_service.is_password_expired(user_id)
+            
+            if is_expired:
+                logger.warning(f"⚠️ Intento de acceso con contraseña expirada para usuario {user_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "code": "PASSWORD_EXPIRED",
+                        "message": "Tu contraseña ha expirado. Debes cambiarla para continuar.",
+                        "requires_password_change": True,
+                        "days_remaining": 0
+                    }
+                )
+            
+            # Opcional: advertencia si expira pronto (menos de 7 días)
+            # El frontend puede mostrar un banner de advertencia
+            password_expiry_warning = None
+            if days_remaining is not None and days_remaining <= 7 and days_remaining > 0:
+                password_expiry_warning = {
+                    "days_remaining": days_remaining,
+                    "message": security_service.get_expiry_warning_message(days_remaining),
+                    "requires_action": days_remaining <= 3
+                }
+                logger.info(f"⚠️ Contraseña expirará en {days_remaining} días para usuario {user_id}")
+            
+            # Obtener token_version
             token_version = await self.supabase_auth.get_token_version(user_id)
             
+            # Obtener metadata del usuario (incluye fechas de expiración)
+            user_metadata = await self.supabase_auth.get_user_metadata(user_id)
+            
+            # Retornar información del usuario
             return {
                 "sub": user_data.get("user_id"),
                 "email": user_data.get("email"),
                 "username": user_data.get("username") or user_data.get("email", "").split("@")[0],
+                "full_name": user_data.get("full_name"),
+                "avatar": user_metadata.get("avatar"),
+                "banner": user_metadata.get("banner"),
+                "bio": user_metadata.get("bio"),
                 "email_verified": user_data.get("email_verified", False),
                 "name": user_data.get("full_name") or user_data.get("username"),
                 "preferred_username": user_data.get("username") or user_data.get("email", "").split("@")[0],
                 "user_metadata": user_data.get("user_metadata", {}),
                 "session_id": user_data.get("session_id"),
-                "token_version": token_version  # Incluimos la versión por si el frontend la necesita
+                "token_version": token_version,
+                # ✅ NUEVOS: Campos de expiración de contraseña
+                "password_expires_at": user_metadata.get("password_expires_at"),
+                "password_changed_at": user_metadata.get("password_changed_at"),
+                "days_until_password_expiry": days_remaining,
+                "password_expiry_warning": password_expiry_warning
             }
             
         except HTTPException:
