@@ -146,9 +146,166 @@ async def enforce_backup_limit(user_id: str, max_backups: int = 20) -> int:
 
 
 # ============================================
-# ENDPOINTS
+# ENDPOINTS - ORDEN CORRECTO
 # ============================================
 
+# ✅ 1. PRIMERO: Endpoints fijos (sin parámetros variables)
+@router.get("/cloud/limit/info")
+async def get_backup_limit_info(current_user: dict = Depends(get_current_user)):
+    """
+    Obtiene información sobre el límite de backups del usuario.
+    ✅ Límite: 20 backups
+    """
+    user_id = current_user.get("sub")
+    
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Usuario no identificado"
+        )
+    
+    try:
+        admin_client = supabase_auth.get_admin_client()
+        
+        result = admin_client.table("cloud_backups")\
+            .select("id", count="exact")\
+            .eq("user_id", str(user_id))\
+            .execute()
+        
+        current_count = result.count if hasattr(result, 'count') else 0
+        max_limit = 20
+        remaining = max_limit - current_count
+        
+        return {
+            "current": current_count,
+            "max": max_limit,
+            "remaining": remaining,
+            "is_full": remaining <= 0,
+            "is_low": 0 < remaining <= 3
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error en get_backup_limit_info: {str(e)}")
+        return {
+            "current": 0,
+            "max": 20,
+            "remaining": 20,
+            "is_full": False,
+            "is_low": False
+        }
+
+
+@router.get("/cloud/stats")
+async def get_cloud_backup_stats(current_user: dict = Depends(get_current_user)):
+    """
+    Obtiene estadísticas de los backups en la nube.
+    """
+    user_id = current_user.get("sub")
+    
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Usuario no identificado"
+        )
+    
+    try:
+        admin_client = supabase_auth.get_admin_client()
+        
+        result = admin_client.table("cloud_backups")\
+            .select("id, note_count, file_size, created_at")\
+            .eq("user_id", str(user_id))\
+            .execute()
+        
+        backups = result.data if result.data else []
+        
+        total_backups = len(backups)
+        total_notes = sum(b.get("note_count", 0) for b in backups)
+        total_size = sum(b.get("file_size", 0) for b in backups)
+        
+        # Backup más reciente
+        latest_backup = None
+        if backups:
+            latest = max(backups, key=lambda x: x.get("created_at", ""))
+            latest_backup = {
+                "created_at": latest.get("created_at"),
+                "note_count": latest.get("note_count")
+            }
+        
+        return {
+            "total_backups": total_backups,
+            "total_notes_backed_up": total_notes,
+            "total_size_bytes": total_size,
+            "total_size_mb": round(total_size / (1024 * 1024), 2),
+            "latest_backup": latest_backup,
+            "limit": 20,
+            "remaining_slots": max(0, 20 - total_backups)
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error en get_cloud_backup_stats: {str(e)}")
+        return {
+            "total_backups": 0,
+            "total_notes_backed_up": 0,
+            "total_size_bytes": 0,
+            "total_size_mb": 0,
+            "latest_backup": None,
+            "limit": 20,
+            "remaining_slots": 20
+        }
+
+
+@router.get("/cloud", response_model=List[CloudBackupMetadata])
+async def get_cloud_backups(current_user: dict = Depends(get_current_user)):
+    """
+    Obtiene la lista de backups en la nube del usuario autenticado.
+    """
+    user_id = current_user.get("sub")
+    
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Usuario no identificado"
+        )
+    
+    logger.info(f"📋 Obteniendo backups en la nube para usuario: {user_id}")
+    
+    try:
+        admin_client = supabase_auth.get_admin_client()
+        
+        # Consultar backups del usuario
+        result = admin_client.table("cloud_backups")\
+            .select("id, user_id, file_name, file_size, note_count, backup_type, device_name, app_version, created_at")\
+            .eq("user_id", str(user_id))\
+            .order("created_at", desc=True)\
+            .execute()
+        
+        backups = result.data if result.data else []
+        logger.info(f"✅ Encontrados {len(backups)} backups")
+        
+        return [
+            CloudBackupMetadata(
+                id=b["id"],
+                user_id=b["user_id"],
+                file_name=b["file_name"],
+                file_size=b["file_size"],
+                note_count=b["note_count"],
+                backup_type=b.get("backup_type", "manual"),
+                device_name=b.get("device_name"),
+                app_version=b.get("app_version"),
+                created_at=datetime.fromisoformat(b["created_at"].replace('Z', '+00:00'))
+            )
+            for b in backups
+        ]
+        
+    except Exception as e:
+        logger.error(f"❌ Error en get_cloud_backups: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener backups: {str(e)}"
+        )
+
+
+# ✅ 2. SEGUNDO: Endpoint POST
 @router.post("/cloud", response_model=CloudBackupResponse)
 async def save_backup_to_cloud(
     backup_data: CloudBackupCreate,
@@ -249,57 +406,7 @@ async def save_backup_to_cloud(
         )
 
 
-@router.get("/cloud", response_model=List[CloudBackupMetadata])
-async def get_cloud_backups(current_user: dict = Depends(get_current_user)):
-    """
-    Obtiene la lista de backups en la nube del usuario autenticado.
-    """
-    user_id = current_user.get("sub")
-    
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Usuario no identificado"
-        )
-    
-    logger.info(f"📋 Obteniendo backups en la nube para usuario: {user_id}")
-    
-    try:
-        admin_client = supabase_auth.get_admin_client()
-        
-        # Consultar backups del usuario
-        result = admin_client.table("cloud_backups")\
-            .select("id, user_id, file_name, file_size, note_count, backup_type, device_name, app_version, created_at")\
-            .eq("user_id", str(user_id))\
-            .order("created_at", desc=True)\
-            .execute()
-        
-        backups = result.data if result.data else []
-        logger.info(f"✅ Encontrados {len(backups)} backups")
-        
-        return [
-            CloudBackupMetadata(
-                id=b["id"],
-                user_id=b["user_id"],
-                file_name=b["file_name"],
-                file_size=b["file_size"],
-                note_count=b["note_count"],
-                backup_type=b.get("backup_type", "manual"),
-                device_name=b.get("device_name"),
-                app_version=b.get("app_version"),
-                created_at=datetime.fromisoformat(b["created_at"].replace('Z', '+00:00'))
-            )
-            for b in backups
-        ]
-        
-    except Exception as e:
-        logger.error(f"❌ Error en get_cloud_backups: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al obtener backups: {str(e)}"
-        )
-
-
+# ✅ 3. TERCERO: Endpoint con parámetro variable (debe ir después de los fijos)
 @router.get("/cloud/{backup_id}")
 async def get_cloud_backup(
     backup_id: UUID,
@@ -525,107 +632,3 @@ async def sync_backups_with_cloud(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al sincronizar backups: {str(e)}"
         )
-
-
-@router.get("/cloud/limit/info")
-async def get_backup_limit_info(current_user: dict = Depends(get_current_user)):
-    """
-    Obtiene información sobre el límite de backups del usuario.
-    ✅ Límite: 20 backups
-    """
-    user_id = current_user.get("sub")
-    
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Usuario no identificado"
-        )
-    
-    try:
-        admin_client = supabase_auth.get_admin_client()
-        
-        result = admin_client.table("cloud_backups")\
-            .select("id", count="exact")\
-            .eq("user_id", str(user_id))\
-            .execute()
-        
-        current_count = result.count if hasattr(result, 'count') else 0
-        max_limit = 20
-        remaining = max_limit - current_count
-        
-        return {
-            "current": current_count,
-            "max": max_limit,
-            "remaining": remaining,
-            "is_full": remaining <= 0,
-            "is_low": 0 < remaining <= 3
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error en get_backup_limit_info: {str(e)}")
-        return {
-            "current": 0,
-            "max": 20,
-            "remaining": 20,
-            "is_full": False,
-            "is_low": False
-        }
-
-
-@router.get("/cloud/stats")
-async def get_cloud_backup_stats(current_user: dict = Depends(get_current_user)):
-    """
-    Obtiene estadísticas de los backups en la nube.
-    """
-    user_id = current_user.get("sub")
-    
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Usuario no identificado"
-        )
-    
-    try:
-        admin_client = supabase_auth.get_admin_client()
-        
-        result = admin_client.table("cloud_backups")\
-            .select("id, note_count, file_size, created_at")\
-            .eq("user_id", str(user_id))\
-            .execute()
-        
-        backups = result.data if result.data else []
-        
-        total_backups = len(backups)
-        total_notes = sum(b.get("note_count", 0) for b in backups)
-        total_size = sum(b.get("file_size", 0) for b in backups)
-        
-        # Backup más reciente
-        latest_backup = None
-        if backups:
-            latest = max(backups, key=lambda x: x.get("created_at", ""))
-            latest_backup = {
-                "created_at": latest.get("created_at"),
-                "note_count": latest.get("note_count")
-            }
-        
-        return {
-            "total_backups": total_backups,
-            "total_notes_backed_up": total_notes,
-            "total_size_bytes": total_size,
-            "total_size_mb": round(total_size / (1024 * 1024), 2),
-            "latest_backup": latest_backup,
-            "limit": 20,
-            "remaining_slots": max(0, 20 - total_backups)
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error en get_cloud_backup_stats: {str(e)}")
-        return {
-            "total_backups": 0,
-            "total_notes_backed_up": 0,
-            "total_size_bytes": 0,
-            "total_size_mb": 0,
-            "latest_backup": None,
-            "limit": 20,
-            "remaining_slots": 20
-        }
