@@ -6,6 +6,7 @@ from app.services.supabase_auth_service import supabase_auth
 from app.services.email_service import email_service
 from app.services.two_factor_service import two_factor_service, two_factor_setup_cache
 from app.services.security_service import security_service, SecurityEventType
+from app.services.session_service import session_service
 from app.config import settings
 from app.dependencies import get_current_user, get_auth_token
 import logging
@@ -16,6 +17,8 @@ import random
 import string
 from datetime import datetime, timedelta
 from collections import defaultdict
+import uuid
+import json
 
 # ============================================
 # IMPORTAR MODELOS DESDE APP.MODELS
@@ -75,6 +78,156 @@ MOBILE_RESET_PASSWORD_URL = "todoappmanager://reset-password"
 otp_storage: Dict[str, dict] = {}
 otp_rate_limit: Dict[str, list] = defaultdict(list)
 reset_otp_storage: Dict[str, dict] = {}
+
+# ============================================
+# FUNCIONES AUXILIARES PARA PARSEAR DISPOSITIVOS (MEJORADAS)
+# ============================================
+
+def _parse_browser(user_agent: str) -> str:
+    """Parsea el navegador del User-Agent"""
+    if not user_agent:
+        return "Desconocido"
+    
+    ua = user_agent.lower()
+    
+    if "chrome" in ua and "edg" not in ua and "opr" not in ua:
+        return "Chrome"
+    elif "firefox" in ua:
+        return "Firefox"
+    elif "safari" in ua and "chrome" not in ua:
+        return "Safari"
+    elif "edg" in ua:
+        return "Edge"
+    elif "opr" in ua or "opera" in ua:
+        return "Opera"
+    elif "brave" in ua:
+        return "Brave"
+    else:
+        return "Desconocido"
+
+
+def _parse_os(user_agent: str) -> str:
+    """Parsea el sistema operativo del User-Agent"""
+    if not user_agent:
+        return "Desconocido"
+    
+    ua = user_agent.lower()
+    
+    if "windows" in ua:
+        return "Windows"
+    elif "mac os" in ua or "macintosh" in ua:
+        return "macOS"
+    elif "linux" in ua:
+        return "Linux"
+    elif "android" in ua:
+        return "Android"
+    elif "ios" in ua or "iphone" in ua or "ipad" in ua:
+        return "iOS"
+    else:
+        return "Desconocido"
+
+
+def _parse_device_info(user_agent: str, ip_address: str) -> Dict[str, Any]:
+    """
+    Parsea información completa del dispositivo con mejor detección.
+    Detecta correctamente si es móvil, tablet o desktop.
+    """
+    ua = user_agent.lower() if user_agent else ""
+    
+    # Detectar tipo de dispositivo - MEJORADO
+    if "mobile" in ua or "android" in ua or "iphone" in ua:
+        device_type = "Móvil"
+    elif "tablet" in ua or "ipad" in ua:
+        device_type = "Tablet"
+    elif "windows" in ua or "mac" in ua or "linux" in ua:
+        device_type = "Desktop"
+    else:
+        device_type = "Web"
+    
+    # Detectar marca - MEJORADO
+    device_brand = None
+    device_model = None
+    
+    # Apple
+    if "iphone" in ua:
+        device_brand = "Apple"
+        device_model = "iPhone"
+    elif "ipad" in ua:
+        device_brand = "Apple"
+        device_model = "iPad"
+    elif "mac" in ua:
+        device_brand = "Apple"
+        device_model = "Mac"
+    
+    # Samsung
+    elif "samsung" in ua:
+        device_brand = "Samsung"
+        if "galaxy" in ua:
+            device_model = "Galaxy"
+    
+    # Google
+    elif "pixel" in ua:
+        device_brand = "Google"
+        device_model = "Pixel"
+    
+    # Xiaomi
+    elif "xiaomi" in ua or "redmi" in ua:
+        device_brand = "Xiaomi"
+    
+    # Huawei
+    elif "huawei" in ua:
+        device_brand = "Huawei"
+    
+    # OnePlus
+    elif "oneplus" in ua:
+        device_brand = "OnePlus"
+    
+    # Motorola
+    elif "motorola" in ua:
+        device_brand = "Motorola"
+    
+    # Nokia
+    elif "nokia" in ua:
+        device_brand = "Nokia"
+    
+    # Desktop brands
+    elif "windows" in ua:
+        if "lenovo" in ua:
+            device_brand = "Lenovo"
+        elif "dell" in ua:
+            device_brand = "Dell"
+        elif "hp" in ua:
+            device_brand = "HP"
+        elif "asus" in ua:
+            device_brand = "ASUS"
+        elif "acer" in ua:
+            device_brand = "Acer"
+    
+    # Detectar navegador
+    browser = _parse_browser(user_agent)
+    
+    # Detectar SO
+    os = _parse_os(user_agent)
+    
+    # Nombre del dispositivo - MEJORADO
+    if device_brand and device_model:
+        device_name = f"{device_brand} {device_model}"
+    elif device_brand:
+        device_name = device_brand
+    elif device_model:
+        device_name = device_model
+    else:
+        device_name = device_type
+    
+    return {
+        "device_name": device_name,
+        "device_type": device_type,
+        "device_brand": device_brand,
+        "device_model": device_model,
+        "browser": browser,
+        "os": os,
+        "location": "Ubicación desconocida"
+    }
 
 
 def generate_otp_code() -> str:
@@ -228,7 +381,7 @@ async def send_otp_email(to_email: str, code: str) -> bool:
 
 
 # ============================================
-# ✅ NUEVO FASE 2: ENDPOINT PARA VERIFICAR ESTADO DE BLOQUEO
+# ENDPOINT PARA VERIFICAR ESTADO DE BLOQUEO
 # ============================================
 
 @router.get("/login-attempts/status")
@@ -257,8 +410,7 @@ async def get_login_attempts_status(email: str, request: Request):
 
 
 # ============================================
-# ✅ NUEVO FASE 2: ENDPOINT PARA ENVÍO DE ADVERTENCIAS DE EXPIRACIÓN
-# (Para ser llamado por un cron job diario)
+# ENDPOINT PARA ENVÍO DE ADVERTENCIAS DE EXPIRACIÓN
 # ============================================
 
 @router.post("/cron/send-password-expiry-warnings")
@@ -268,7 +420,6 @@ async def send_password_expiry_warnings_cron(request: Request):
     Debe ser llamado por un cron job diario.
     Solo accesible con service_role.
     """
-    # Verificar que la solicitud viene de un origen confiable
     auth_header = request.headers.get("Authorization", "")
     expected_key = f"Bearer {settings.SUPABASE_SERVICE_KEY}"
     
@@ -284,7 +435,6 @@ async def send_password_expiry_warnings_cron(request: Request):
     try:
         admin_client = supabase_auth.get_admin_client()
         
-        # Obtener todos los usuarios
         users_response = admin_client.auth.admin.list_users()
         users = users_response.users if hasattr(users_response, 'users') else []
         
@@ -297,11 +447,9 @@ async def send_password_expiry_warnings_cron(request: Request):
             user_metadata = user.user_metadata or {}
             user_name = user_metadata.get("full_name") or user_metadata.get("username") or user_email.split('@')[0]
             
-            # Verificar expiración
             is_expired, days_remaining = await security_service.is_password_expired(user_id)
             
             if not is_expired and days_remaining is not None and days_remaining > 0:
-                # Verificar si debe enviar advertencia
                 last_notified = user_metadata.get("last_expiry_notification_days")
                 
                 if security_service.should_notify_expiry(days_remaining, last_notified):
@@ -309,7 +457,6 @@ async def send_password_expiry_warnings_cron(request: Request):
                         await email_service.send_password_expiry_warning(user_email, user_name, days_remaining)
                         warnings_sent += 1
                         
-                        # Actualizar metadata del usuario en profiles
                         try:
                             await security_service.update_user_metadata(user_id, {
                                 "last_expiry_notification_days": days_remaining,
@@ -340,7 +487,7 @@ async def send_password_expiry_warnings_cron(request: Request):
 
 
 # ============================================
-# ENDPOINTS DE AUTENTICACIÓN EXISTENTES
+# ENDPOINTS DE AUTENTICACIÓN
 # ============================================
 
 @router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
@@ -408,10 +555,11 @@ async def login(credentials: LoginRequest, req: Request = None):
             detail="Servicio de autenticación no disponible"
         )
     
-    # ✅ Obtener IP del cliente
+    # Obtener IP del cliente
     ip_address = req.client.host if req else "unknown"
+    user_agent = req.headers.get("User-Agent", "Desconocido")
     
-    # ✅ Verificar si la cuenta está bloqueada (RATE LIMITING FASE 2)
+    # Verificar si la cuenta está bloqueada
     is_locked, locked_until, remaining_attempts = await security_service.is_account_locked(
         credentials.email, ip_address
     )
@@ -448,14 +596,30 @@ async def login(credentials: LoginRequest, req: Request = None):
         })
         
         if not response or not response.user:
-            # ✅ Registrar intento fallido con rate limiting (FASE 2)
+            # Registrar intento fallido
             await security_service.record_failed_login(
                 email=credentials.email,
                 ip_address=ip_address,
                 user_id=None
             )
             
-            # Obtener información actualizada
+            # Registrar en historial de login (fallido)
+            device_info = _parse_device_info(user_agent, ip_address)
+            await session_service.add_login_history(
+                user_id=None,
+                login_type="password",
+                status="failed",
+                ip_address=ip_address,
+                device_name=device_info.get("device_name", "Desconocido"),
+                device_type=device_info.get("device_type", "web"),
+                device_brand=device_info.get("device_brand"),
+                device_model=device_info.get("device_model"),
+                browser=device_info.get("browser"),
+                os=device_info.get("os"),
+                location=device_info.get("location", "Desconocida"),
+                details={"error": "Invalid credentials"}
+            )
+            
             attempt_info = await security_service.get_failed_attempts_info(credentials.email, ip_address)
             
             raise HTTPException(
@@ -474,7 +638,7 @@ async def login(credentials: LoginRequest, req: Request = None):
                 user_id=response.user.id,
                 event_type=SecurityEventType.LOGIN_FAILED,
                 ip_address=ip_address,
-                user_agent=req.headers.get("User-Agent"),
+                user_agent=user_agent,
                 details={"email": credentials.email, "reason": "email_not_confirmed"}
             )
             raise HTTPException(
@@ -484,7 +648,7 @@ async def login(credentials: LoginRequest, req: Request = None):
         
         user_id = response.user.id
         
-        # ✅ Verificar expiración de contraseña
+        # Verificar expiración de contraseña
         is_expired, days_remaining = await security_service.is_password_expired(user_id)
         
         if is_expired:
@@ -493,7 +657,7 @@ async def login(credentials: LoginRequest, req: Request = None):
                 user_id=user_id,
                 event_type=SecurityEventType.PASSWORD_EXPIRED,
                 ip_address=ip_address,
-                user_agent=req.headers.get("User-Agent"),
+                user_agent=user_agent,
                 details={"email": credentials.email, "days_remaining": 0}
             )
             raise HTTPException(
@@ -516,16 +680,55 @@ async def login(credentials: LoginRequest, req: Request = None):
         except Exception as e:
             logger.warning(f"⚠️ Error verificando 2FA: {e}")
         
-        # ✅ Registrar evento de seguridad: login exitoso
+        # REGISTRAR SESIÓN E HISTORIAL (LOGIN CONTRASEÑA)
+        device_info = _parse_device_info(user_agent, ip_address)
+        
+        # Registrar en historial de login (contraseña)
+        await session_service.add_login_history(
+            user_id=user_id,
+            login_type="password",
+            status="success",
+            ip_address=ip_address,
+            device_name=device_info.get("device_name", "Desconocido"),
+            device_type=device_info.get("device_type", "web"),
+            device_brand=device_info.get("device_brand"),
+            device_model=device_info.get("device_model"),
+            browser=device_info.get("browser"),
+            os=device_info.get("os"),
+            location=device_info.get("location", "Desconocida"),
+            details={"requires_2fa": requires_2fa}
+        )
+        
+        # Crear sesión activa (solo si no requiere 2FA)
+        if not requires_2fa:
+            session_token = str(uuid.uuid4())
+            await session_service.create_session(
+                user_id=user_id,
+                session_data={
+                    "session_token": session_token,
+                    "device_name": device_info.get("device_name", "Desconocido"),
+                    "device_type": device_info.get("device_type", "web"),
+                    "device_brand": device_info.get("device_brand"),
+                    "device_model": device_info.get("device_model"),
+                    "browser": device_info.get("browser"),
+                    "os": device_info.get("os"),
+                    "ip_address": ip_address,
+                    "location": device_info.get("location", "Desconocida"),
+                    "is_current": True
+                }
+            )
+            logger.info(f"✅ Sesión creada para usuario {user_id}")
+        
+        # Registrar evento de seguridad: login exitoso
         await security_service.log_security_event(
             user_id=user_id,
             event_type=SecurityEventType.LOGIN_SUCCESS,
             ip_address=ip_address,
-            user_agent=req.headers.get("User-Agent"),
+            user_agent=user_agent,
             details={"email": credentials.email, "requires_2fa": requires_2fa}
         )
         
-        # ✅ Limpiar intentos fallidos después de login exitoso (FASE 2)
+        # Limpiar intentos fallidos
         await security_service.reset_failed_logins(credentials.email, ip_address)
         
         # Si tiene 2FA activado, devolver respuesta especial
@@ -668,7 +871,7 @@ async def logout(request: RefreshTokenRequest, req: Request = None):
 
 
 # ============================================
-# ✅ ENDPOINT FORGOT-PASSWORD
+# ENDPOINT FORGOT-PASSWORD
 # ============================================
 
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
@@ -709,7 +912,7 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
 
 
 # ============================================
-# ✅ RESET DE CONTRASEÑA POR CÓDIGO OTP
+# RESET DE CONTRASEÑA POR CÓDIGO OTP
 # ============================================
 
 @router.post("/forgot-password-otp", response_model=ForgotPasswordResponse)
@@ -833,7 +1036,7 @@ async def forgot_password_otp(request: ForgotPasswordRequest):
 @router.post("/reset-password-otp", response_model=ResetPasswordResponse)
 async def reset_password_otp(request: ResetPasswordOtpVerifyRequest, req: Request = None):
     """
-    ✅ NUEVO: Verifica código OTP y cambia la contraseña.
+    Verifica código OTP y cambia la contraseña.
     Incluye validación de fortaleza, historial y expiración.
     """
     logger.info(f"🔐 Verificando código OTP para reset: {request.email}")
@@ -872,7 +1075,7 @@ async def reset_password_otp(request: ResetPasswordOtpVerifyRequest, req: Reques
     # Código correcto - limpiar
     del reset_otp_storage[request.email]
     
-    # ✅ Validar fortaleza de la nueva contraseña
+    # Validar fortaleza de la nueva contraseña
     policy = await security_service.get_password_policy()
     is_valid, errors = security_service.validate_password_strength(request.new_password, policy)
     
@@ -910,7 +1113,7 @@ async def reset_password_otp(request: ResetPasswordOtpVerifyRequest, req: Reques
                 detail="Usuario no encontrado."
             )
         
-        # ✅ Verificar reutilización de contraseña
+        # Verificar reutilización de contraseña
         new_password_hash = security_service.hash_password_for_history(request.new_password)
         can_reuse, times_used = await security_service.check_password_reuse(user_id, new_password_hash)
         
@@ -928,17 +1131,17 @@ async def reset_password_otp(request: ResetPasswordOtpVerifyRequest, req: Reques
         
         logger.info(f"✅ Contraseña actualizada para usuario: {user_id}")
         
-        # ✅ Registrar en historial de contraseñas
+        # Registrar en historial de contraseñas
         await security_service.record_password_history(user_id, new_password_hash)
         await security_service.cleanup_old_password_history(user_id, 20)
         
-        # ✅ Actualizar fecha de expiración
+        # Actualizar fecha de expiración
         await security_service.update_password_expiry(user_id)
         
-        # ✅ Invalidar todas las sesiones
+        # Invalidar todas las sesiones
         await security_service.invalidate_all_sessions(user_id)
         
-        # ✅ Registrar evento de seguridad
+        # Registrar evento de seguridad
         await security_service.log_security_event(
             user_id=user_id,
             event_type=SecurityEventType.PASSWORD_RESET_VIA_OTP,
@@ -969,7 +1172,7 @@ async def reset_password_otp(request: ResetPasswordOtpVerifyRequest, req: Reques
 async def reset_password(request: ResetPasswordRequest, req: Request = None):
     """
     Restablece la contraseña usando el token recibido por email.
-    ✅ INCLUYE: validación de fortaleza, historial, expiración
+    Incluye: validación de fortaleza, historial, expiración
     """
     logger.info("🔐 Intentando restablecer contraseña")
     
@@ -1010,7 +1213,7 @@ async def reset_password(request: ResetPasswordRequest, req: Request = None):
                     detail="No se pudo identificar al usuario"
                 )
             
-            # ✅ Validar fortaleza de la nueva contraseña
+            # Validar fortaleza de la nueva contraseña
             policy = await security_service.get_password_policy()
             is_valid, errors = security_service.validate_password_strength(request.new_password, policy)
             
@@ -1020,7 +1223,7 @@ async def reset_password(request: ResetPasswordRequest, req: Request = None):
                     detail={"errors": errors, "message": "La contraseña no cumple los requisitos de seguridad"}
                 )
             
-            # ✅ Verificar reutilización de contraseña
+            # Verificar reutilización de contraseña
             new_password_hash = security_service.hash_password_for_history(request.new_password)
             can_reuse, times_used = await security_service.check_password_reuse(user_id, new_password_hash)
             
@@ -1055,17 +1258,17 @@ async def reset_password(request: ResetPasswordRequest, req: Request = None):
                         detail=f"Error al actualizar contraseña: {error_msg}"
                     )
             
-            # ✅ Registrar en historial
+            # Registrar en historial
             await security_service.record_password_history(user_id, new_password_hash)
             await security_service.cleanup_old_password_history(user_id, 20)
             
-            # ✅ Actualizar fecha de expiración
+            # Actualizar fecha de expiración
             await security_service.update_password_expiry(user_id)
             
-            # ✅ Invalidar todas las sesiones
+            # Invalidar todas las sesiones
             await security_service.invalidate_all_sessions(user_id)
             
-            # ✅ Registrar evento de seguridad
+            # Registrar evento de seguridad
             await security_service.log_security_event(
                 user_id=user_id,
                 event_type=SecurityEventType.PASSWORD_CHANGED,
@@ -1109,7 +1312,7 @@ async def reset_password(request: ResetPasswordRequest, req: Request = None):
 
 
 # ============================================
-# ✅ ENDPOINT CHANGE-PASSWORD ACTUALIZADO
+# ENDPOINT CHANGE-PASSWORD ACTUALIZADO
 # ============================================
 
 @router.post("/change-password", response_model=ChangePasswordResponse)
@@ -1121,7 +1324,7 @@ async def change_password(
 ):
     """
     Cambia la contraseña del usuario autenticado.
-    ✅ INCLUYE: validación de fortaleza, historial, expiración, eventos
+    Incluye: validación de fortaleza, historial, expiración, eventos
     """
     user_id = current_user.get("sub")
     user_email = current_user.get("email")
@@ -1151,7 +1354,7 @@ async def change_password(
             })
             
             if not verification or not verification.user:
-                # ✅ Registrar intento fallido
+                # Registrar intento fallido
                 await security_service.log_security_event(
                     user_id=user_id,
                     event_type=SecurityEventType.PASSWORD_CHANGE_FAILED,
@@ -1186,7 +1389,7 @@ async def change_password(
                 detail="La nueva contraseña debe ser diferente a la actual"
             )
         
-        # ✅ Validar fortaleza de la nueva contraseña
+        # Validar fortaleza de la nueva contraseña
         policy = await security_service.get_password_policy()
         is_valid, errors = security_service.validate_password_strength(request.new_password, policy)
         
@@ -1196,7 +1399,7 @@ async def change_password(
                 detail={"errors": errors, "message": "La contraseña no cumple los requisitos de seguridad"}
             )
         
-        # ✅ Verificar reutilización de contraseña
+        # Verificar reutilización de contraseña
         new_password_hash = security_service.hash_password_for_history(request.new_password)
         can_reuse, times_used = await security_service.check_password_reuse(user_id, new_password_hash)
         
@@ -1234,17 +1437,17 @@ async def change_password(
                     detail="Error al actualizar contraseña"
                 )
         
-        # ✅ Registrar en historial de contraseñas
+        # Registrar en historial de contraseñas
         await security_service.record_password_history(user_id, new_password_hash)
         await security_service.cleanup_old_password_history(user_id, 20)
         
-        # ✅ Actualizar fecha de expiración
+        # Actualizar fecha de expiración
         await security_service.update_password_expiry(user_id)
         
-        # ✅ Invalidar todas las sesiones
+        # Invalidar todas las sesiones
         await security_service.invalidate_all_sessions(user_id)
         
-        # ✅ Registrar evento de seguridad
+        # Registrar evento de seguridad
         await security_service.log_security_event(
             user_id=user_id,
             event_type=SecurityEventType.PASSWORD_CHANGED,
@@ -1287,7 +1490,7 @@ async def change_password(
 
 
 # ============================================
-# ✅ ENDPOINT: POLÍTICA DE CONTRASEÑAS (FASE 1)
+# ENDPOINT: POLÍTICA DE CONTRASEÑAS
 # ============================================
 
 @router.get("/password-policy")
@@ -1310,7 +1513,7 @@ async def get_password_policy_endpoint():
 
 
 # ============================================
-# ✅ ENDPOINT: VERIFICAR EXPIRACIÓN DE CONTRASEÑA
+# ENDPOINT: VERIFICAR EXPIRACIÓN DE CONTRASEÑA
 # ============================================
 
 @router.get("/check-password-expiry")
@@ -1543,12 +1746,52 @@ async def verify_otp_code(request: OtpVerifyRequest, req: Request = None):
         
         refresh_token = create_refresh_token(subject=user_id)
         
-        # ✅ Registrar evento de seguridad: login OTP
+        # REGISTRAR SESIÓN E HISTORIAL (LOGIN OTP)
+        ip_address = req.client.host if req else "unknown"
+        user_agent = req.headers.get("User-Agent", "Desconocido")
+        device_info = _parse_device_info(user_agent, ip_address)
+        
+        # Registrar en historial de login
+        await session_service.add_login_history(
+            user_id=user_id,
+            login_type="otp",
+            status="success",
+            ip_address=ip_address,
+            device_name=device_info.get("device_name", "Desconocido"),
+            device_type=device_info.get("device_type", "web"),
+            device_brand=device_info.get("device_brand"),
+            device_model=device_info.get("device_model"),
+            browser=device_info.get("browser"),
+            os=device_info.get("os"),
+            location=device_info.get("location", "Desconocida"),
+            details={"method": "otp"}
+        )
+        
+        # Crear sesión activa
+        session_token = str(uuid.uuid4())
+        await session_service.create_session(
+            user_id=user_id,
+            session_data={
+                "session_token": session_token,
+                "device_name": device_info.get("device_name", "Desconocido"),
+                "device_type": device_info.get("device_type", "web"),
+                "device_brand": device_info.get("device_brand"),
+                "device_model": device_info.get("device_model"),
+                "browser": device_info.get("browser"),
+                "os": device_info.get("os"),
+                "ip_address": ip_address,
+                "location": device_info.get("location", "Desconocida"),
+                "is_current": True
+            }
+        )
+        logger.info(f"✅ Sesión creada para usuario {user_id} (OTP)")
+        
+        # Registrar evento de seguridad: login OTP
         await security_service.log_security_event(
             user_id=user_id,
             event_type=SecurityEventType.LOGIN_SUCCESS,
-            ip_address=req.client.host if req else None,
-            user_agent=req.headers.get("User-Agent"),
+            ip_address=ip_address,
+            user_agent=user_agent,
             details={"method": "otp"}
         )
         
@@ -1697,6 +1940,15 @@ async def enable_2fa(
         admin_client.table("user_two_factor").insert(two_factor_data).execute()
         logger.info(f"✅ 2FA activado para usuario {user_id}")
         
+        # Registrar cambio de seguridad
+        await session_service.add_security_change(
+            user_id=user_id,
+            change_type="2fa_enable",
+            ip_address=req.client.host if req else None,
+            location="Ubicación desconocida",
+            details={"method": "totp"}
+        )
+        
         await security_service.log_security_event(
             user_id=user_id,
             event_type=SecurityEventType.TWO_FACTOR_ENABLED,
@@ -1823,11 +2075,51 @@ async def verify_2fa(request: TwoFactorVerifyRequest, req: Request = None):
     
     refresh_token = create_refresh_token(subject=user_id)
     
+    # REGISTRAR SESIÓN E HISTORIAL (LOGIN 2FA) - USANDO update_login_history
+    ip_address = req.client.host if req else "unknown"
+    user_agent = req.headers.get("User-Agent", "Desconocido")
+    device_info = _parse_device_info(user_agent, ip_address)
+    
+    # ✅ USAR update_login_history para unificar el registro (password → 2fa)
+    await session_service.update_login_history(
+        user_id=user_id,
+        login_type="2fa",
+        status="success",
+        ip_address=ip_address,
+        device_name=device_info.get("device_name", "Desconocido"),
+        device_type=device_info.get("device_type", "web"),
+        device_brand=device_info.get("device_brand"),
+        device_model=device_info.get("device_model"),
+        browser=device_info.get("browser"),
+        os=device_info.get("os"),
+        location=device_info.get("location", "Desconocida"),
+        details={"method": "2fa"}
+    )
+    
+    # Crear sesión activa (solo una vez)
+    session_token = str(uuid.uuid4())
+    await session_service.create_session(
+        user_id=user_id,
+        session_data={
+            "session_token": session_token,
+            "device_name": device_info.get("device_name", "Desconocido"),
+            "device_type": device_info.get("device_type", "web"),
+            "device_brand": device_info.get("device_brand"),
+            "device_model": device_info.get("device_model"),
+            "browser": device_info.get("browser"),
+            "os": device_info.get("os"),
+            "ip_address": ip_address,
+            "location": device_info.get("location", "Desconocida"),
+            "is_current": True
+        }
+    )
+    logger.info(f"✅ Sesión creada para usuario {user_id} (2FA)")
+    
     await security_service.log_security_event(
         user_id=user_id,
         event_type=SecurityEventType.TWO_FACTOR_VERIFIED,
-        ip_address=req.client.host if req else None,
-        user_agent=req.headers.get("User-Agent"),
+        ip_address=ip_address,
+        user_agent=user_agent,
         details={"method": "totp"}
     )
     
@@ -1896,6 +2188,15 @@ async def disable_2fa(
             }).eq("user_id", user_id).execute()
             
             logger.info(f"✅ 2FA desactivado para usuario {user_id}")
+            
+            # Registrar cambio de seguridad
+            await session_service.add_security_change(
+                user_id=user_id,
+                change_type="2fa_disable",
+                ip_address=req.client.host if req else None,
+                location="Ubicación desconocida",
+                details={"reason": "user_initiated"}
+            )
         else:
             user_data = await supabase_auth.get_user_by_id(user_id)
             user_metadata = user_data.get("user_metadata", {})

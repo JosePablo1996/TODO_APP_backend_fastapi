@@ -1,4 +1,13 @@
 # app/services/security_service.py
+"""
+Servicio centralizado para seguridad y auditoría.
+Maneja:
+- Eventos de seguridad
+- Gestión de sesiones (token_version)
+- Bloqueo de cuentas (rate limiting)
+- Expiración de contraseñas
+- Políticas de contraseñas
+"""
 import logging
 import hashlib
 import secrets
@@ -43,7 +52,7 @@ class SecurityService:
     Maneja:
     - Eventos de seguridad
     - Gestión de sesiones (token_version)
-    - Bloqueo de cuentas (rate limiting) ✅ FASE 2
+    - Bloqueo de cuentas (rate limiting)
     - Expiración de contraseñas
     - Políticas de contraseñas
     """
@@ -315,7 +324,7 @@ class SecurityService:
             return f"Tu contraseña está vigente por {days_remaining} días más."
 
     # ============================================
-    # EVENTOS DE SEGURIDAD
+    # EVENTOS DE SEGURIDAD - CORREGIDO
     # ============================================
 
     async def log_security_event(
@@ -326,7 +335,10 @@ class SecurityService:
         user_agent: Optional[str] = None,
         details: Optional[Dict] = None
     ) -> bool:
-        """Registra un evento de seguridad en la base de datos."""
+        """
+        Registra un evento de seguridad en la base de datos.
+        ✅ CORREGIDO: Manejo correcto de la respuesta de Supabase
+        """
         try:
             admin_client = supabase_auth.get_admin_client()
             
@@ -339,15 +351,22 @@ class SecurityService:
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
             
-            result = admin_client.table("security_events").insert(event_data)
+            # Ejecutar inserción
+            result = admin_client.table("security_events").insert(event_data).execute()
             
-            if result.data:
+            # ✅ Verificar si la operación fue exitosa
+            # En Supabase, si no hay error, la inserción fue exitosa
+            if hasattr(result, 'data'):
                 logger.info(f"📝 Evento de seguridad registrado: {event_type} para usuario {user_id}")
                 return True
-            return False
-            
+            else:
+                # Si no hay datos pero no hubo error, consideramos éxito
+                logger.info(f"📝 Evento de seguridad registrado: {event_type} para usuario {user_id}")
+                return True
+                
         except Exception as e:
-            logger.error(f"❌ Error registrando evento de seguridad: {e}")
+            logger.error(f"❌ Error registrando evento de seguridad: {str(e)}")
+            # ✅ No fallar la operación principal si el log falla
             return False
 
     async def get_security_events(
@@ -397,7 +416,7 @@ class SecurityService:
             return []
 
     # ============================================
-    # ✅ RATE LIMITING (FASE 2)
+    # RATE LIMITING
     # ============================================
 
     async def record_failed_login(
@@ -454,7 +473,7 @@ class SecurityService:
                         "is_locked": is_locked,
                         "locked_until": locked_until,
                         "updated_at": now.isoformat(),
-                        "user_id": user_id  # Actualizar user_id si ahora lo conocemos
+                        "user_id": user_id
                     })\
                     .eq("id", attempt["id"])\
                     .execute()
@@ -519,9 +538,7 @@ class SecurityService:
             }
 
     async def reset_failed_logins(self, email: str, ip_address: str) -> bool:
-        """
-        Resetea los intentos fallidos de login (después de login exitoso).
-        """
+        """Resetea los intentos fallidos de login."""
         try:
             admin_client = supabase_auth.get_admin_client()
             
@@ -543,10 +560,7 @@ class SecurityService:
         email: str, 
         ip_address: str
     ) -> Tuple[bool, Optional[datetime], Optional[int]]:
-        """
-        Verifica si una cuenta está bloqueada.
-        Retorna: (está_bloqueada, fecha_desbloqueo, intentos_restantes)
-        """
+        """Verifica si una cuenta está bloqueada."""
         try:
             admin_client = supabase_auth.get_admin_client()
             
@@ -564,20 +578,16 @@ class SecurityService:
                     now = datetime.now(timezone.utc)
                     
                     if locked_until > now:
-                        # Todavía bloqueado
                         remaining_attempts = 0
                         return True, locked_until, remaining_attempts
                     else:
-                        # Bloqueo expirado, resetear automáticamente
                         await self.reset_failed_logins(email, ip_address)
                         return False, None, self.max_login_attempts
                 
-                # No bloqueado, calcular intentos restantes
                 attempt_count = attempt.get("attempt_count", 0)
                 remaining_attempts = max(0, self.max_login_attempts - attempt_count)
                 return False, None, remaining_attempts
             
-            # No hay registros, cuenta libre
             return False, None, self.max_login_attempts
             
         except Exception as e:
@@ -585,9 +595,7 @@ class SecurityService:
             return False, None, self.max_login_attempts
 
     async def get_failed_attempts_info(self, email: str, ip_address: str) -> Dict:
-        """
-        Obtiene información detallada sobre los intentos fallidos.
-        """
+        """Obtiene información detallada sobre los intentos fallidos."""
         try:
             admin_client = supabase_auth.get_admin_client()
             
@@ -673,10 +681,10 @@ class SecurityService:
             
         except Exception as e:
             logger.error(f"❌ Error verificando session_version: {e}")
-            return True  # En caso de error, permitir acceso
+            return True
 
     # ============================================
-    # MÉTODOS DE METADATA (para mantener compatibilidad)
+    # MÉTODOS DE METADATA
     # ============================================
 
     async def get_user_metadata(self, user_id: str) -> Dict[str, Any]:
@@ -698,7 +706,6 @@ class SecurityService:
         try:
             admin_client = supabase_auth.get_admin_client()
             
-            # Verificar si el perfil existe
             existing = admin_client.table("profiles").select("*").eq("id", user_id).execute()
             
             if existing.data and len(existing.data) > 0:

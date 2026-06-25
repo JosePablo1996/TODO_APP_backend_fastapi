@@ -1,3 +1,4 @@
+# app/services/webauthn_service.py
 """
 Servicio para manejar WebAuthn/Passkeys
 """
@@ -32,36 +33,24 @@ class WebAuthnService:
     """Servicio para manejar WebAuthn/Passkeys"""
 
     def __init__(self):
-        # ✅ Verificar si estamos forzando entorno de desarrollo
-        force_dev = os.getenv("WEBAUTHN_FORCE_DEV", "").lower() in ("true", "1", "yes")
+        # ✅ Obtener la URL del frontend
+        frontend_url = settings.FRONTEND_URL
         
-        if force_dev:
-            # MODO DESARROLLO FORZADO - Para frontend en localhost
+        # ✅ Verificar si estamos en desarrollo local
+        is_localhost = "localhost" in frontend_url or "127.0.0.1" in frontend_url
+        
+        # ✅ Configurar RP ID según el entorno
+        if is_localhost:
+            # EN DESARROLLO LOCAL: usar localhost
             self.rp_id = "localhost"
-            self.origin = os.getenv("WEBAUTHN_ORIGIN", "http://localhost:5173")
-            logger.info(f"🏠 [WEBAUTHN] MODO DESARROLLO FORZADO (WEBAUTHN_FORCE_DEV=true)")
+            self.origin = frontend_url
+            logger.info(f"🏠 [WEBAUTHN] Entorno LOCAL detectado (RP ID: {self.rp_id})")
         else:
-            # Comportamiento normal según entorno
-            frontend_url = settings.FRONTEND_URL
-            render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
-            is_render = bool(render_host)
-            
-            if frontend_url and "localhost" in frontend_url:
-                self.rp_id = "localhost"
-                self.origin = frontend_url
-                logger.info(f"🏠 [WEBAUTHN] Entorno LOCAL detectado por FRONTEND_URL")
-            elif is_render:
-                self.rp_id = render_host
-                self.origin = f"https://{render_host}"
-                logger.info(f"🔄 [WEBAUTHN] Entorno RENDER detectado")
-            elif frontend_url:
-                self.rp_id = frontend_url.replace("https://", "").replace("http://", "").split(":")[0]
-                self.origin = frontend_url
-                logger.info(f"🌐 [WEBAUTHN] Entorno PRODUCCIÓN detectado")
-            else:
-                self.rp_id = "localhost"
-                self.origin = "http://localhost:5173"
-                logger.info(f"🏠 [WEBAUTHN] Usando configuración por defecto (localhost)")
+            # EN PRODUCCIÓN: usar el dominio del frontend
+            # El RP ID debe ser el dominio del sitio web, no del backend
+            self.rp_id = frontend_url.replace("https://", "").replace("http://", "").split(":")[0]
+            self.origin = frontend_url
+            logger.info(f"🌐 [WEBAUTHN] Entorno PRODUCCIÓN detectado (RP ID: {self.rp_id})")
         
         self.rp_name = settings.API_TITLE
 
@@ -71,6 +60,8 @@ class WebAuthnService:
                 "http://localhost:5173",  # Vite dev server
                 "http://localhost:8000",  # FastAPI local
                 "http://localhost:3000",  # Alternativa común
+                "http://127.0.0.1:5173",
+                "http://127.0.0.1:8000",
             ]
         else:
             self.allowed_origins = [self.origin]
@@ -98,6 +89,28 @@ class WebAuthnService:
         if padding != 4:
             credential_id += '=' * padding
         return base64.urlsafe_b64decode(credential_id)
+
+    def _normalize_credential_id(self, credential_id: str) -> str:
+        """
+        Normaliza el credential_id para comparación insensible a encoding.
+        Elimina padding '=' y caracteres especiales que pueden variar entre diferentes
+        implementaciones de WebAuthn.
+        """
+        if not credential_id:
+            return ""
+        # Eliminar padding '=' y espacios
+        normalized = credential_id.replace('=', '').strip()
+        logger.debug(f"   Credential ID normalizado: {normalized[:20]}... (original: {credential_id[:20]}...)")
+        return normalized
+
+    def _credential_ids_match(self, id1: str, id2: str) -> bool:
+        """
+        Compara dos credential_ids de forma insensible a encoding.
+        Retorna True si coinciden después de normalizar.
+        """
+        if not id1 or not id2:
+            return False
+        return self._normalize_credential_id(id1) == self._normalize_credential_id(id2)
 
     def _cleanup_expired_challenges(self):
         """Limpia challenges expirados (más de 5 minutos)"""
@@ -158,8 +171,15 @@ class WebAuthnService:
             return []
 
     async def get_credential_by_id(self, credential_id: str) -> Optional[Dict[str, Any]]:
-        """Obtiene una credencial por su ID"""
-        logger.debug(f"🔍 Buscando credencial por ID: {credential_id[:20]}...")
+        """
+        Obtiene una credencial por su ID.
+        ✅ AHORA CON BÚSQUEDA INSENSIBLE A ENCODING
+        """
+        if not credential_id:
+            logger.warning("⚠️ credential_id vacío")
+            return None
+            
+        logger.info(f"🔍 Buscando credencial por ID: {credential_id[:30]}...")
         
         if not supabase_auth.is_available():
             logger.warning("⚠️ Supabase no está disponible para buscar credencial")
@@ -167,14 +187,82 @@ class WebAuthnService:
 
         try:
             admin_client = supabase_auth.get_admin_client()
+            
+            # ✅ PRIMERO: Buscar exactamente por credential_id
+            logger.debug(f"   Buscando coincidencia exacta...")
             response = admin_client.table("user_passkeys").select("*").eq("credential_id", credential_id).execute()
-
+            
             if response.data and len(response.data) > 0:
                 cred = response.data[0]
-                logger.debug(f"   ✅ Credencial encontrada para usuario: {cred['user_id']}")
+                logger.info(f"   ✅ Credencial encontrada por coincidencia exacta para usuario: {cred['user_id']}")
                 return cred
+            
+            # ✅ SEGUNDO: Si no se encuentra, buscar en todas las credenciales y comparar normalizadas
+            logger.debug(f"   Coincidencia exacta no encontrada, buscando por comparación normalizada...")
+            
+            # Obtener todas las credenciales (limitado a 1000 por seguridad)
+            all_response = admin_client.table("user_passkeys").select("*").limit(1000).execute()
+            
+            if all_response.data:
+                credential_id_normalized = self._normalize_credential_id(credential_id)
+                
+                for cred in all_response.data:
+                    stored_id = cred.get("credential_id", "")
+                    if self._credential_ids_match(credential_id, stored_id):
+                        logger.info(f"   ✅ Credencial encontrada por coincidencia normalizada para usuario: {cred['user_id']}")
+                        logger.info(f"      ID en BD: {stored_id[:30]}...")
+                        logger.info(f"      ID buscado: {credential_id[:30]}...")
+                        return cred
+                
+                logger.warning(f"   ⚠️ No se encontró credencial con ID normalizado: {credential_id_normalized[:30]}...")
+            
+            # ✅ TERCERO: Si hay un usuario específico, intentar buscar por user_id + credential_id
+            # Esto ayuda en casos donde la credencial pertenece a un usuario específico
+            logger.debug(f"   Busqueda normalizada falló, no se encontró la credencial")
+            
+            logger.warning(f"   ⚠️ Credencial no encontrada después de todas las estrategias de búsqueda")
+            return None
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "PGRST205" in error_msg:
+                logger.debug("ℹ️ Tabla user_passkeys aún no creada")
+            else:
+                logger.error(f"❌ Error obteniendo credencial: {error_msg[:200]}")
+            return None
 
-            logger.debug(f"   ⚠️ Credencial no encontrada")
+    async def get_credential_by_id_for_user(self, user_id: str, credential_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Obtiene una credencial por su ID y user_id.
+        Útil para verificar que la credencial pertenece al usuario correcto.
+        """
+        logger.debug(f"🔍 Buscando credencial para usuario {user_id}: {credential_id[:30]}...")
+        
+        if not supabase_auth.is_available():
+            logger.warning("⚠️ Supabase no está disponible para buscar credencial")
+            return None
+
+        try:
+            admin_client = supabase_auth.get_admin_client()
+            
+            # Buscar por user_id y credential_id exacto
+            response = admin_client.table("user_passkeys").select("*").eq("user_id", user_id).eq("credential_id", credential_id).execute()
+            
+            if response.data and len(response.data) > 0:
+                cred = response.data[0]
+                logger.debug(f"   ✅ Credencial encontrada para usuario: {user_id}")
+                return cred
+            
+            # Si no se encuentra, buscar normalizado
+            all_response = admin_client.table("user_passkeys").select("*").eq("user_id", user_id).limit(100).execute()
+            
+            for cred in all_response.data:
+                stored_id = cred.get("credential_id", "")
+                if self._credential_ids_match(credential_id, stored_id):
+                    logger.debug(f"   ✅ Credencial encontrada por coincidencia normalizada para usuario: {user_id}")
+                    return cred
+            
+            logger.debug(f"   ⚠️ No se encontró credencial para usuario: {user_id}")
             return None
             
         except Exception as e:
@@ -197,7 +285,7 @@ class WebAuthnService:
         """Guarda una nueva credencial WebAuthn"""
         logger.info(f"💾 Guardando credencial para usuario: {user_id}")
         logger.debug(f"   RP ID usado: {self.rp_id}")
-        logger.debug(f"   Credential ID: {credential_id[:20]}...")
+        logger.debug(f"   Credential ID: {credential_id[:30]}...")
         logger.debug(f"   Sign count: {sign_count}")
         logger.debug(f"   Device name: {device_name}")
         logger.debug(f"   Device type: {device_type}")
@@ -214,7 +302,7 @@ class WebAuthnService:
 
             credential_data = {
                 "user_id": user_id,
-                "credential_id": credential_id,
+                "credential_id": credential_id,  # Guardar sin modificar
                 "public_key": public_key_b64,
                 "sign_count": sign_count,
                 "device_name": device_name,
@@ -229,6 +317,7 @@ class WebAuthnService:
 
             if response.data and len(response.data) > 0:
                 logger.info(f"✅ Credencial guardada exitosamente para usuario {user_id}")
+                logger.info(f"   Credential ID: {credential_id[:30]}...")
                 return True
             else:
                 logger.error("❌ Error al guardar credencial - respuesta vacía")
@@ -244,7 +333,7 @@ class WebAuthnService:
 
     async def update_credential_sign_count(self, credential_id: str, new_sign_count: int) -> bool:
         """Actualiza el sign_count de una credencial"""
-        logger.debug(f"🔄 Actualizando sign_count para credencial: {credential_id[:20]}...")
+        logger.debug(f"🔄 Actualizando sign_count para credencial: {credential_id[:30]}...")
         
         if not supabase_auth.is_available():
             logger.warning("⚠️ Supabase no está disponible para actualizar sign_count")
@@ -252,11 +341,20 @@ class WebAuthnService:
 
         try:
             admin_client = supabase_auth.get_admin_client()
+            
+            # Buscar la credencial primero (por si el ID está normalizado)
+            credential = await self.get_credential_by_id(credential_id)
+            if not credential:
+                logger.warning(f"⚠️ No se encontró credencial para actualizar sign_count: {credential_id[:30]}...")
+                return False
+            
+            actual_id = credential["credential_id"]
+            
             response = admin_client.table("user_passkeys").update({
                 "sign_count": new_sign_count,
                 "last_used": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
-            }).eq("credential_id", credential_id).execute()
+            }).eq("credential_id", actual_id).execute()
 
             success = len(response.data) > 0
             if success:

@@ -3,7 +3,7 @@
 Modelos Pydantic para la API
 """
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 
 
@@ -107,7 +107,7 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: Optional[int] = None
     user: Optional[Dict[str, Any]] = None
-    # ✅ Campos adicionales para 2FA (autenticación de dos factores)
+    # ✅ Campos adicionales para 2FA
     requires_2fa: Optional[bool] = None
     message: Optional[str] = None
     user_id: Optional[str] = None
@@ -381,7 +381,7 @@ class TaskBase(BaseModel):
 
 class TaskCreate(TaskBase):
     """Modelo para crear tarea"""
-    pass
+    color: Optional[str] = Field(None, description="Color de la tarea en formato hex")
 
 
 class TaskUpdate(BaseModel):
@@ -393,12 +393,20 @@ class TaskUpdate(BaseModel):
     due_date: Optional[str] = None
     category: Optional[str] = Field(None, max_length=50)
     tags: Optional[List[str]] = None
+    color: Optional[str] = Field(None, description="Color de la tarea en formato hex")
+    deleted_at: Optional[str] = Field(None, description="Fecha de eliminación (soft delete)")
+    is_favorite: Optional[bool] = Field(None, description="Marcar como favorita")
+    is_archived: Optional[bool] = Field(None, description="Marcar como archivada")
 
 
 class Task(TaskBase):
     """Modelo de respuesta de tarea"""
     id: str
     user_id: str
+    color: Optional[str] = Field(None, description="Color de la tarea")
+    is_favorite: Optional[bool] = Field(False, description="Tarea favorita")
+    is_archived: Optional[bool] = Field(False, description="Tarea archivada")
+    deleted_at: Optional[str] = Field(None, description="Fecha de eliminación (soft delete)")
     created_at: str
     updated_at: Optional[str] = None
 
@@ -586,7 +594,7 @@ class OtpVerifyResponse(BaseModel):
 
 
 # ============================================
-# ✅ NUEVOS MODELOS PARA 2FA (TOTP)
+# MODELOS PARA 2FA (TOTP)
 # ============================================
 
 class TwoFactorSetupRequest(BaseModel):
@@ -724,73 +732,7 @@ class TwoFactorStatusResponse(BaseModel):
 
 
 # ============================================
-# EXPORTAR TODOS LOS MODELOS
-# ============================================
-
-__all__ = [
-    # Autenticación
-    "ForgotPasswordRequest",
-    "ResetPasswordRequest",
-    "LoginRequest",
-    "RefreshTokenRequest",
-    "RegisterRequest",
-    "RegisterResponse",
-    "LoginResponse",
-    "RefreshTokenResponse",
-    "ForgotPasswordResponse",
-    "ResetPasswordResponse",
-    "LogoutResponse",
-    "ChangePasswordRequest",
-    "ChangePasswordResponse",
-    "DebugCheckResponse",
-    # Token
-    "TokenResponse",
-    "UserInfoResponse",
-    "PasswordResetToken",
-    "VerifyTokenResponse",
-    # Respuestas estándar
-    "StandardResponse",
-    "ErrorResponse",
-    "HealthResponse",
-    # Perfil de usuario
-    "ProfileUpdateRequest",
-    "ProfileResponse",
-    "UserResponse",
-    # Tareas
-    "TaskBase",
-    "TaskCreate",
-    "TaskUpdate",
-    "Task",
-    "TaskStats",
-    # WebAuthn / Passkeys
-    "WebAuthnRegistrationBeginRequest",
-    "WebAuthnRegistrationBeginResponse",
-    "WebAuthnRegistrationCompleteRequest",
-    "WebAuthnRegistrationCompleteResponse",
-    "WebAuthnLoginBeginRequest",
-    "WebAuthnLoginBeginResponse",
-    "WebAuthnLoginCompleteRequest",
-    "WebAuthnLoginCompleteResponse",
-    "WebAuthnCredentialResponse",
-    "WebAuthnDeleteRequest",
-    # OTP
-    "OtpSendRequest",
-    "OtpSendResponse",
-    "OtpVerifyRequest",
-    "OtpVerifyResponse",
-    # 2FA (TOTP)
-    "TwoFactorSetupRequest",
-    "TwoFactorSetupResponse",
-    "TwoFactorEnableRequest",
-    "TwoFactorEnableResponse",
-    "TwoFactorVerifyRequest",
-    "TwoFactorVerifyResponse",
-    "TwoFactorDisableRequest",
-    "TwoFactorStatusResponse",
-]
-
-# ============================================
-# ✅ NUEVO: RESET DE CONTRASEÑA POR CÓDIGO OTP
+# RESET DE CONTRASEÑA POR CÓDIGO OTP
 # ============================================
 
 class ResetPasswordOtpRequest(BaseModel):
@@ -804,6 +746,7 @@ class ResetPasswordOtpRequest(BaseModel):
             }
         }
     )
+
 
 class ResetPasswordOtpVerifyRequest(BaseModel):
     """Verifica código OTP y cambia contraseña"""
@@ -821,10 +764,136 @@ class ResetPasswordOtpVerifyRequest(BaseModel):
         }
     )
 
+
 class ResetPasswordOtpResponse(BaseModel):
     """Respuesta del reset de contraseña"""
     message: str
     success: bool = True
+
+
+# ============================================
+# ✅ NUEVOS MODELOS DE SESIONES
+# ============================================
+
+class SessionBase(BaseModel):
+    """Base para sesión"""
+    device_name: Optional[str] = Field(None, max_length=100)
+    device_type: Optional[str] = Field(None, max_length=50)
+    device_brand: Optional[str] = Field(None, max_length=50)
+    device_model: Optional[str] = Field(None, max_length=100)
+    browser: Optional[str] = Field(None, max_length=100)
+    os: Optional[str] = Field(None, max_length=100)
+    ip_address: Optional[str] = Field(None, max_length=45)
+    location: Optional[str] = Field(None, max_length=200)
+    is_current: bool = Field(False)
+
+
+class SessionCreate(SessionBase):
+    """Crear sesión"""
+    session_token: str
+    user_id: str
+
+
+class Session(SessionBase):
+    """Respuesta de sesión"""
+    id: str
+    user_id: str
+    last_activity: datetime
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RevokeAllSessionsResponse(BaseModel):
+    """Respuesta al revocar todas las sesiones"""
+    revoked_count: int
+    message: str
+
+
+class SessionStatsResponse(BaseModel):
+    """Estadísticas de seguridad"""
+    total_logins: int
+    unique_devices: int
+    last_login: Optional[Dict[str, Any]] = None
+    security_score: int
+    recommendations: List[str]
+    has_passkey: bool = False
+    has_2fa: bool = False
+    days_since_password_change: Optional[int] = None
+
+
+# ============================================
+# ✅ MODELOS DE HISTORIAL DE ACCESOS (CORREGIDOS)
+# ============================================
+
+class LoginHistoryBase(BaseModel):
+    """Base para historial de login"""
+    login_type: str
+    ip_address: Optional[str] = None
+    device_name: Optional[str] = None
+    device_type: Optional[str] = None
+    device_brand: Optional[str] = None
+    device_model: Optional[str] = None
+    browser: Optional[str] = None
+    os: Optional[str] = None
+    location: Optional[str] = None
+    status: str
+    details: Optional[Any] = None  # ✅ Cambiado a Any para aceptar string o dict
+
+
+class LoginHistoryCreate(LoginHistoryBase):
+    """Crear historial de login"""
+    user_id: str
+
+
+class LoginHistory(LoginHistoryBase):
+    """Respuesta de historial de login"""
+    id: str
+    user_id: str
+    created_at: datetime
+    details: Optional[Any] = None  # ✅ Cambiado a Any
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LoginHistoryFilters(BaseModel):
+    """Filtros para historial de login"""
+    login_type: Optional[str] = None
+    status: Optional[str] = None
+    date_from: Optional[datetime] = None
+    date_to: Optional[datetime] = None
+    limit: int = 50
+    offset: int = 0
+
+
+# ============================================
+# ✅ MODELOS DE CAMBIOS DE SEGURIDAD
+# ============================================
+
+class SecurityChangeBase(BaseModel):
+    """Base para cambio de seguridad"""
+    change_type: str
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    ip_address: Optional[str] = None
+    location: Optional[str] = None
+    status: str = "success"
+    details: Optional[Dict[str, Any]] = None
+
+
+class SecurityChangeCreate(SecurityChangeBase):
+    """Crear cambio de seguridad"""
+    user_id: str
+
+
+class SecurityChange(SecurityChangeBase):
+    """Respuesta de cambio de seguridad"""
+    id: str
+    user_id: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ============================================
@@ -891,8 +960,21 @@ __all__ = [
     "TwoFactorVerifyResponse",
     "TwoFactorDisableRequest",
     "TwoFactorStatusResponse",
-    # ✅ NUEVOS: Reset de contraseña por código OTP
+    # Reset de contraseña por código OTP
     "ResetPasswordOtpRequest",
     "ResetPasswordOtpVerifyRequest",
     "ResetPasswordOtpResponse",
+    # ✅ NUEVOS MODELOS DE SESIONES
+    "Session",
+    "SessionCreate",
+    "SessionBase",
+    "RevokeAllSessionsResponse",
+    "SessionStatsResponse",
+    "LoginHistory",
+    "LoginHistoryCreate",
+    "LoginHistoryBase",
+    "LoginHistoryFilters",
+    "SecurityChange",
+    "SecurityChangeCreate",
+    "SecurityChangeBase",
 ]
